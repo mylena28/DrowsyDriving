@@ -1,0 +1,4 @@
+opencv-python-headless
+picamera2
+ultralytics
+numpy

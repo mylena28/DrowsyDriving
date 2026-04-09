@@ -1,0 +1,18 @@
+services:
+  monitor:
+    build: .
+    container_name: monitor-motorista
+    privileged: true   # alternativa mais simples (dá acesso total)
+    # Ou, mais granular (recomendado):
+    # devices:
+    #   - "/dev/dri/renderD128:/dev/dri/renderD128"
+    #   - "/dev/media0:/dev/media0"
+    # group_add:
+    #   - video
+    #   - render
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+      - DISPLAY=${DISPLAY}
+    stdin_open: true
+    tty: true
