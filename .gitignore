@@ -1,5 +1,32 @@
-detectors/pose_iter_102000.caffemodel
+# --- Python ---
 __pycache__/
-*.pyc
-*.pyo
-.DS_Store
+venv/
+*.py[cod]
+*$py.class
+
+# --- Simulações e Dados (Engenharia) ---
+*.dat
+*.out
+*.bin
+*.log
+
+# --- Executáveis ---
+*.exe
+*.app
+*.o
+*.so
+
+# --- Modelos de IA Pesados ---
+*.caffemodel
+*.pt
+*.prototxt
+*.h5
+*.onnx
+*.weights
+
+# --- LaTeX (Para seus relatórios de Doutorado) ---
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc

@@ -13,6 +13,6 @@ services:
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
     environment:
-      - DISPLAY=${DISPLAY}
+      - YOLO_CONFIG_DIR=/tmp/Ultralytics
     stdin_open: true
     tty: true
