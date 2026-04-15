@@ -2,17 +2,26 @@ services:
   monitor:
     build: .
     container_name: monitor-motorista
-    privileged: true   # alternativa mais simples (dá acesso total)
-    # Ou, mais granular (recomendado):
-    # devices:
-    #   - "/dev/dri/renderD128:/dev/dri/renderD128"
-    #   - "/dev/media0:/dev/media0"
-    # group_add:
-    #   - video
-    #   - render
+    privileged: true
+    # Mount the full host /dev so libcamera can enumerate ALL camera pipeline
+    # nodes (media*, video*, v4l-subdev*). On Pi 5 the ISP uses many more
+    # device nodes than Pi 4 and an explicit device list would be fragile.
+    # privileged: true alone does not auto-populate the container's /dev.
     volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev:/dev                       # all host devices (camera pipeline)
+      - /run/udev:/run/udev:ro          # udev database — needed for libcamera enumeration
+      - /tmp/libcamera:/tmp/libcamera
+      - ./logs:/app/logs
     environment:
       - YOLO_CONFIG_DIR=/tmp/Ultralytics
+      - LIBCAMERA_LOG_LEVELS=WARNING
+      - PYTHONUNBUFFERED=1
+      # Run IPA modules in-process — the default subprocess sandbox can fail
+      # inside Docker because of missing kernel namespacing features.
+      - LIBCAMERA_IPA_FORCE_ISOLATION=0
+    group_add:
+      - "44"   # video
+      - "993"  # render
     stdin_open: true
     tty: true
+    restart: "no"

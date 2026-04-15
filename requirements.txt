@@ -1,4 +1,8 @@
-opencv-python-headless
-picamera2
-ultralytics
-numpy
+# Runtime deps (matches the Docker runtime stage)
+# numpy and opencv come from apt (python3-numpy, python3-opencv) to avoid
+# conflicts with picamera2; only onnxruntime is installed via pip.
+onnxruntime
+
+# For local development outside Docker (optional)
+# opencv-python-headless
+# numpy

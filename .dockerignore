@@ -5,3 +5,7 @@ venv/
 .venv/
 *.caffemodel
 *.prototxt
+*.pt
+*.onnx
+docker-compose.log
+.github/

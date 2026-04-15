@@ -1,9 +1,9 @@
 import cv2
-from ultralytics import YOLO
+from detectors.yolo_onnx import YOLOOnnx
 
 class PoseDetector:
-    def __init__(self, model_path='yolov8n-pose.pt'):
-        self.model = YOLO(model_path)
+    def __init__(self, model_path='yolov8n-pose.onnx'):
+        self.model = YOLOOnnx(model_path)
 
     def update(self, frame):
         # Inferência leve para RPi 5
