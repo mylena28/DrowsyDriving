@@ -24,6 +24,10 @@ venv/
 *.onnx
 *.weights
 
+# --- Scripts locais de deploy (contêm IPs/credenciais privadas) ---
+sync_to_pi.sh
+sync_*.sh
+
 # --- LaTeX (Para seus relatórios de Doutorado) ---
 *.aux
 *.fdb_latexmk

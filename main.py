@@ -217,11 +217,30 @@ def main():
                 else:
                     current_fps = 0
 
+                # Build active-alert list from each detector's output
+                alerts = []
+                if head_turned:
+                    alerts.append("HEAD TURN")
+                if eye_rubbing:
+                    alerts.append("EYE RUBBING")
+                if phone is not None:
+                    alerts.append("PHONE DETECTED")
+                if phone_state == "EM LIGACAO":
+                    alerts.append("ON CALL")
+                elif phone_state == "USANDO CELULAR":
+                    alerts.append("PHONE IN USE")
+                if hands_busy:
+                    alerts.append("HANDS BUSY")
+
+                alert_str = ", ".join(alerts) if alerts else "none"
+
                 print(f"[{frame_count:06d}] FPS: {current_fps:.1f} | "
-                      f"Face: {'✓' if nose is not None else '✗'} | "
-                      f"Mãos: {len(hands)} | "
-                      f"Celular: {phone_state} | "
-                      f"Estado: {state}")
+                      f"Face: {'YES' if nose is not None else 'NO ':>3} | "
+                      f"Hands: {len(hands)} | "
+                      f"Phone: {'YES' if phone is not None else 'NO ':>3} | "
+                      f"Score: {stable_score:5.1f} | "
+                      f"State: {state} | "
+                      f"Alerts: {alert_str}")
 
             # --- EXIBIÇÃO GRÁFICA (opcional, apenas em desktop) ---
             if SHOW_DISPLAY:
