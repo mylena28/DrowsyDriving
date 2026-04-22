@@ -18,7 +18,7 @@ def get_color(score):
         return (0,0,150)
 
 
-def draw_status(frame, state, score):
+def draw_status(frame, state, score, alerts=None):
 
     x, y = 20, 40
     color = get_color(score)
@@ -28,9 +28,11 @@ def draw_status(frame, state, score):
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0, color, 2)
 
-#    cv2.putText(frame, f"Atencao: {score}%",
-#                (x, y+40),
-#                cv2.FONT_HERSHEY_SIMPLEX,
-#                0.9, color, 2)
+    if alerts:
+        for i, alert in enumerate(alerts):
+            cv2.putText(frame, f"  {alert}",
+                        (x, y + 40 + i * 32),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (0, 200, 255), 2)
 
     return frame

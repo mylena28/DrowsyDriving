@@ -42,18 +42,28 @@ FROM debian:bookworm-slim AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Raspberry Pi repo (needed for python3-picamera2)
+# Base packages — work on both amd64 and arm64
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gnupg curl ca-certificates && \
-    curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key | \
-    gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.com/debian/ bookworm main" \
-    > /etc/apt/sources.list.d/raspi.list
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-pip python3-numpy python3-opencv python3-picamera2 \
-    libcamera-ipa rpicam-apps-lite libglib2.0-0 libgomp1 && \
+    python3-pip python3-numpy python3-opencv \
+    libglib2.0-0 libgomp1 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# RPi-only packages: installed only on arm64 (Raspberry Pi 5)
+# On amd64 (laptop) these packages don't exist, so this block is skipped entirely.
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gnupg curl ca-certificates && \
+    curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key | \
+        gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] \
+        http://archive.raspberrypi.com/debian/ bookworm main" \
+        > /etc/apt/sources.list.d/raspi.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3-picamera2 libcamera-ipa rpicam-apps-lite && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 WORKDIR /app
 

@@ -41,12 +41,14 @@ logs:
 shell:
 	$(DOCKER_COMPOSE) run --rm monitor bash
 
-# Python clean (__pycache__, .pyc, etc.)
+# Python clean (__pycache__, .pyc, etc.) + logs gerados
 .PHONY: clean
 clean:
 	@echo "Removendo pastas __pycache__ e arquivos .pyc..."
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
+	@echo "Removendo logs gerados (imagens, vídeos, eventos)..."
+	find ./logs -type f \( -name "*.jpg" -o -name "*.mp4" -o -name "*.avi" -o -name "*.dat" -o -name "*.csv" \) -delete 2>/dev/null || true
 	@echo "Limpeza concluída."
 
 # Docker system prune (cuidado: remove recursos não utilizados)

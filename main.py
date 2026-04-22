@@ -2,6 +2,7 @@ import cv2
 import sys
 import os
 import time
+import argparse
 import numpy as np
 
 # --- DETECÇÃO DE HARDWARE ---
@@ -125,6 +126,11 @@ def initialize_opencv_fallback():
 def main():
     global picam2, PICAMERA_AVAILABLE
 
+    parser = argparse.ArgumentParser(description="DrowsyDriving Monitor")
+    parser.add_argument("--venv", action="store_true",
+                        help="Modo venv: abre janela com câmera e diagnóstico em texto (sem caixas)")
+    args = parser.parse_args()
+
     # --- INICIALIZAÇÃO DA CÂMERA ---
     cap_opencv = None
     get_frame = None
@@ -163,11 +169,26 @@ def main():
     stabilizer = StateStabilizer(window_size=15, change_threshold=5)
 
     # Define se deve mostrar janela gráfica
-    SHOW_DISPLAY = "DISPLAY" in os.environ and not IS_RASPBERRY_PI
+    # --venv força a janela mesmo sem DISPLAY no env (modo local com venv)
+    SHOW_DISPLAY = args.venv or ("DISPLAY" in os.environ and not IS_RASPBERRY_PI)
+
+    if args.venv:
+        print("🖥️  Modo venv ativado: exibindo câmera com diagnóstico em tela")
 
     frame_count = 0
     fps_update_time = time.time()
     fps_counter = 0
+    last_snapshot_time = 0.0
+    last_phone = None
+    last_hands_busy = False
+    DETECT_EVERY_N = 3  # run object detection every N frames (phone/hands)
+    SNAPSHOT_COOLDOWN = 5.0  # seconds between snapshots
+    SNAPSHOT_DIR = os.path.join(os.path.dirname(__file__), "logs")
+
+    # --- GRAVAÇÃO DE VÍDEO (desative mudando para False) ---
+    RECORD_VIDEO = True
+    video_writer = None
+    video_path = None
 
     print("\n" + "="*50)
     print("🚀 MONITORAMENTO INICIADO")
@@ -197,7 +218,12 @@ def main():
             hands = pose_data["hands"]
 
             # --- ANÁLISE DE COMPORTAMENTOS ---
-            phone, hands_busy = detect_objects(frame, model, nose, eye_l, eye_r, hands)
+            # Object detection (phone/hands) runs every DETECT_EVERY_N frames —
+            # phone position changes slowly so the stale result is accurate enough.
+            if frame_count % DETECT_EVERY_N == 0:
+                last_phone, last_hands_busy = detect_objects(
+                    frame, model, nose, eye_l, eye_r, hands)
+            phone, hands_busy = last_phone, last_hands_busy
             head_turned = head_turn_detector.update(nose, eye_l, eye_r)
             eye_rubbing = eye_rub_detector.update(hands, eye_l, eye_r)
             phone_state = phone_detector.update(phone, nose, eye_l, eye_r)
@@ -206,9 +232,58 @@ def main():
             stable_score = 100.0
             state = "MONITORANDO"
 
+            # --- ALERTAS ATIVOS (construído uma vez por frame) ---
+            alerts = []
+            if head_turned:
+                alerts.append("HEAD TURN")
+            if eye_rubbing:
+                alerts.append("EYE RUBBING")
+            if phone is not None:
+                alerts.append("PHONE DETECTED")
+            if phone_state == "EM LIGACAO":
+                alerts.append("ON CALL")
+            elif phone_state == "USANDO CELULAR":
+                alerts.append("PHONE IN USE")
+            if hands_busy:
+                alerts.append("HANDS BUSY")
+
+            # --- GRAVAÇÃO DE VÍDEO QUANDO ROSTO DETECTADO ---
+            if RECORD_VIDEO:
+                face_visible = nose is not None
+                h, w = frame.shape[:2]
+                if face_visible and video_writer is None:
+                    ts = time.strftime("%Y%m%d_%H%M%S")
+                    video_path = os.path.join(SNAPSHOT_DIR, f"{ts}_video.avi")
+                    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+                    video_writer = cv2.VideoWriter(video_path, fourcc, 20.0, (w, h))
+                    if not video_writer.isOpened():
+                        print(f"❌ Falha ao abrir VideoWriter: {video_path}")
+                        video_writer = None
+                    else:
+                        print(f"🎥 Gravação iniciada: {video_path}")
+                elif not face_visible and video_writer is not None:
+                    video_writer.release()
+                    print(f"🎥 Gravação encerrada: {video_path}")
+                    video_writer = None
+                    video_path = None
+                if video_writer is not None:
+                    video_writer.write(frame)
+
+            # --- SALVA FRAME E LOG QUANDO HÁ ALERTAS ---
+            now = time.time()
+            if alerts and (now - last_snapshot_time) >= SNAPSHOT_COOLDOWN:
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                tag = alerts[0].replace(" ", "_")
+                filename = os.path.join(SNAPSHOT_DIR, f"{ts}_{tag}.jpg")
+                cv2.imwrite(filename, frame)
+                log_file = os.path.join(SNAPSHOT_DIR, "eventos.dat")
+                with open(log_file, "a") as f:
+                    f.write(f"{ts},{', '.join(alerts)},{os.path.basename(filename)}\n")
+                print(f"📸 Snapshot salvo: {filename}  [{', '.join(alerts)}]")
+                last_snapshot_time = now
+
             # --- LOG DE DIAGNÓSTICO (a cada 30 frames) ---
             if frame_count % 30 == 0:
-                # Calcula FPS aproximado
                 elapsed = time.time() - fps_update_time
                 if elapsed > 0:
                     current_fps = fps_counter / elapsed
@@ -216,21 +291,6 @@ def main():
                     fps_update_time = time.time()
                 else:
                     current_fps = 0
-
-                # Build active-alert list from each detector's output
-                alerts = []
-                if head_turned:
-                    alerts.append("HEAD TURN")
-                if eye_rubbing:
-                    alerts.append("EYE RUBBING")
-                if phone is not None:
-                    alerts.append("PHONE DETECTED")
-                if phone_state == "EM LIGACAO":
-                    alerts.append("ON CALL")
-                elif phone_state == "USANDO CELULAR":
-                    alerts.append("PHONE IN USE")
-                if hands_busy:
-                    alerts.append("HANDS BUSY")
 
                 alert_str = ", ".join(alerts) if alerts else "none"
 
@@ -244,7 +304,21 @@ def main():
 
             # --- EXIBIÇÃO GRÁFICA (opcional, apenas em desktop) ---
             if SHOW_DISPLAY:
-                display_frame = draw_status(frame, state, stable_score)
+                display_alerts = []
+                if head_turned:
+                    display_alerts.append("VIRANDO A CABECA")
+                if eye_rubbing:
+                    display_alerts.append("ESFREGANDO OS OLHOS")
+                if phone is not None:
+                    display_alerts.append("CELULAR DETECTADO")
+                if phone_state == "EM LIGACAO":
+                    display_alerts.append("EM LIGACAO")
+                elif phone_state == "USANDO CELULAR":
+                    display_alerts.append("USANDO CELULAR")
+                if hands_busy:
+                    display_alerts.append("MAOS OCUPADAS")
+
+                display_frame = draw_status(frame, state, stable_score, display_alerts)
                 cv2.imshow("Monitoramento DrowsyDriving", display_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("\n⏸️  Interrompido pelo usuário (tecla Q)")
@@ -266,6 +340,9 @@ def main():
     finally:
         # --- LIMPEZA DE RECURSOS ---
         print("\n🧹 Limpando recursos...")
+        if video_writer is not None:
+            video_writer.release()
+            print(f"   ✓ Vídeo salvo: {video_path}")
         if picam2 is not None:
             picam2.stop()
             print("   ✓ Picamera2 liberada")
