@@ -82,7 +82,9 @@ COPY . .
 RUN groupadd -f -g 44 video && groupadd -f -g 993 render && \
     useradd -m -s /bin/bash -G video,render salte && \
     mkdir -p /tmp/Ultralytics && \
-    chown -R salte:salte /app /tmp/Ultralytics
+    chown -R salte:salte /app /tmp/Ultralytics && \
+    chmod +x /app/docker-entrypoint.sh
 
-USER salte
+# Entrypoint runs as root to fix volume permissions, then drops to salte
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["python3", "main.py"]

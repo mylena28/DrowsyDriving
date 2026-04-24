@@ -11,7 +11,8 @@ class PoseDetector:
 
         data = {
             "nose": None, "eye_l": None, "eye_r": None,
-            "hands": []
+            "hands": [],
+            "hand_l": None, "hand_r": None,
         }
 
         for r in results:
@@ -25,8 +26,12 @@ class PoseDetector:
                     data["eye_l"] = kp[1] if kp[1].any() else None
                     data["eye_r"] = kp[2] if kp[2].any() else None
 
-                    # Adiciona pulsos como mãos
-                    if kp[9].any(): data["hands"].append(kp[9])
-                    if kp[10].any(): data["hands"].append(kp[10])
+                    # Pulsos individualmente e como lista
+                    if kp[9].any():
+                        data["hand_l"] = kp[9]
+                        data["hands"].append(kp[9])
+                    if kp[10].any():
+                        data["hand_r"] = kp[10]
+                        data["hands"].append(kp[10])
 
         return data

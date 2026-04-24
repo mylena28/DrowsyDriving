@@ -23,10 +23,12 @@ build:
 
 .PHONY: up
 up:
+	mkdir -p logs
 	$(DOCKER_COMPOSE) up
 
 .PHONY: up-d
 up-d:
+	mkdir -p logs
 	$(DOCKER_COMPOSE) up -d
 
 .PHONY: down

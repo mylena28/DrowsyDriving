@@ -16,6 +16,7 @@ services:
       - YOLO_CONFIG_DIR=/tmp/Ultralytics
       - LIBCAMERA_LOG_LEVELS=WARNING
       - PYTHONUNBUFFERED=1
+      - OPENCV_VIDEOIO_PRIORITY_GSTREAMER=0
       # Run IPA modules in-process — the default subprocess sandbox can fail
       # inside Docker because of missing kernel namespacing features.
       - LIBCAMERA_IPA_FORCE_ISOLATION=0

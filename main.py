@@ -34,9 +34,9 @@ from detectors.pose_detector import PoseDetector
 from behaviors.head_turn import HeadTurnDetector
 from behaviors.eye_rub import EyeRubDetector
 from behaviors.phone_usage import PhoneStateDetector
+from behaviors.hand_busy import HandBusyDetector
 from utils.display import draw_status
-from utils.stabilizer import StateStabilizer
-from utils.risk import compute_score
+from utils.risk import RiskTracker
 from utils.classifier import classify_from_score
 from detectors.yolo_onnx import YOLOOnnx
 
@@ -44,6 +44,7 @@ from detectors.yolo_onnx import YOLOOnnx
 head_turn_detector = HeadTurnDetector(frames_threshold=5)
 eye_rub_detector = EyeRubDetector(frames_threshold=5)
 phone_detector = PhoneStateDetector(call_frames_threshold=8)
+hand_busy_detector = HandBusyDetector()
 
 # Modelos YOLO carregados globalmente para economizar memória no Pi 5
 model = YOLOOnnx("yolov8n.onnx")
@@ -166,7 +167,7 @@ def main():
             return
 
     # --- INÍCIO DO MONITORAMENTO ---
-    stabilizer = StateStabilizer(window_size=15, change_threshold=5)
+    risk_tracker = RiskTracker()
 
     # Define se deve mostrar janela gráfica
     # --venv força a janela mesmo sem DISPLAY no env (modo local com venv)
@@ -216,10 +217,11 @@ def main():
             eye_l = pose_data["eye_l"]
             eye_r = pose_data["eye_r"]
             hands = pose_data["hands"]
+            hand_l = pose_data["hand_l"]
+            hand_r = pose_data["hand_r"]
 
             # --- ANÁLISE DE COMPORTAMENTOS ---
-            # Object detection (phone/hands) runs every DETECT_EVERY_N frames —
-            # phone position changes slowly so the stale result is accurate enough.
+            # Object detection runs every DETECT_EVERY_N frames (phone changes slowly).
             if frame_count % DETECT_EVERY_N == 0:
                 last_phone, last_hands_busy = detect_objects(
                     frame, model, nose, eye_l, eye_r, hands)
@@ -227,10 +229,22 @@ def main():
             head_turned = head_turn_detector.update(nose, eye_l, eye_r)
             eye_rubbing = eye_rub_detector.update(hands, eye_l, eye_r)
             phone_state = phone_detector.update(phone, nose, eye_l, eye_r)
+            hand_l_busy, hand_r_busy = hand_busy_detector.update(
+                hand_l, hand_r, eye_l, eye_r, nose)
+            busy_count = int(hand_l_busy) + int(hand_r_busy)
 
-            # Placeholders (lógica de fadiga removida conforme solicitado)
-            stable_score = 100.0
-            state = "MONITORANDO"
+            # --- PONTUAÇÃO DE RISCO ---
+            events = {
+                "phone_call":        phone_state == "EM LIGACAO",
+                "phone_use":         phone_state == "USANDO CELULAR",
+                "head_turn":         head_turned,
+                "eye_rub":           eye_rubbing,
+                "one_hand_raised":   busy_count == 1,
+                "two_hands_raised":  busy_count == 2,
+                "hands_busy_object": hands_busy,
+            }
+            stable_score = risk_tracker.update(events, frame_start)
+            state = classify_from_score(stable_score)
 
             # --- ALERTAS ATIVOS (construído uma vez por frame) ---
             alerts = []
@@ -246,6 +260,10 @@ def main():
                 alerts.append("PHONE IN USE")
             if hands_busy:
                 alerts.append("HANDS BUSY")
+            if busy_count == 1:
+                alerts.append("1 MAO OCUPADA")
+            elif busy_count == 2:
+                alerts.append("2 MAOS OCUPADAS")
 
             # --- GRAVAÇÃO DE VÍDEO QUANDO ROSTO DETECTADO ---
             if RECORD_VIDEO:
@@ -294,13 +312,14 @@ def main():
 
                 alert_str = ", ".join(alerts) if alerts else "none"
 
+                dbg = risk_tracker.debug_info()
+                active_dbg = {k: v for k, v in dbg.items() if v["active_secs"] > 0 or v["recent_count"] > 0}
                 print(f"[{frame_count:06d}] FPS: {current_fps:.1f} | "
                       f"Face: {'YES' if nose is not None else 'NO ':>3} | "
-                      f"Hands: {len(hands)} | "
-                      f"Phone: {'YES' if phone is not None else 'NO ':>3} | "
                       f"Score: {stable_score:5.1f} | "
                       f"State: {state} | "
-                      f"Alerts: {alert_str}")
+                      f"Alerts: {alert_str} | "
+                      f"Risk detail: {active_dbg}")
 
             # --- EXIBIÇÃO GRÁFICA (opcional, apenas em desktop) ---
             if SHOW_DISPLAY:
@@ -317,6 +336,10 @@ def main():
                     display_alerts.append("USANDO CELULAR")
                 if hands_busy:
                     display_alerts.append("MAOS OCUPADAS")
+                if busy_count == 1:
+                    display_alerts.append("1 MAO LEVANTADA")
+                elif busy_count == 2:
+                    display_alerts.append("2 MAOS LEVANTADAS")
 
                 display_frame = draw_status(frame, state, stable_score, display_alerts)
                 cv2.imshow("Monitoramento DrowsyDriving", display_frame)
