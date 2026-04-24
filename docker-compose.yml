@@ -25,4 +25,4 @@ services:
       - "993"  # render
     stdin_open: true
     tty: true
-    restart: "no"
+    restart: unless-stopped

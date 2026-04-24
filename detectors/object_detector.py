@@ -8,7 +8,7 @@ def detect_objects(frame, model, nose_point, eye_l, eye_r, hands):
     hands_busy = False
 
     # Realiza a detecção de objetos (celular, garrafa, etc.)
-    results = model(frame, verbose=False)
+    results = model(frame, imgsz=320, verbose=False)
 
     for r in results:
         for box in r.boxes:

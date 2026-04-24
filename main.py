@@ -2,6 +2,8 @@ import cv2
 import sys
 import os
 import time
+import queue
+import threading
 import argparse
 import numpy as np
 
@@ -49,6 +51,41 @@ hand_busy_detector = HandBusyDetector()
 # Modelos YOLO carregados globalmente para economizar memória no Pi 5
 model = YOLOOnnx("yolov8n.onnx")
 pose_detector = PoseDetector("yolov8n-pose.onnx")
+
+class _AsyncVideoWriter:
+    """Encodes and writes frames in a background thread so the main loop never blocks on disk I/O."""
+
+    def __init__(self):
+        self._writer = None
+        self._q = queue.Queue(maxsize=10)
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self):
+        while True:
+            writer, frame = self._q.get()
+            writer.write(frame)
+            self._q.task_done()
+
+    def open(self, path, fourcc, fps, size):
+        self._writer = cv2.VideoWriter(path, fourcc, fps, size)
+        return self._writer.isOpened()
+
+    def write(self, frame):
+        if self._writer is not None:
+            try:
+                self._q.put_nowait((self._writer, frame.copy()))
+            except queue.Full:
+                pass  # drop frame rather than stall the main loop
+
+    def release(self):
+        if self._writer is not None:
+            self._q.join()  # flush all pending frames before closing
+            self._writer.release()
+            self._writer = None
+
+    def isOpened(self):
+        return self._writer is not None and self._writer.isOpened()
+
 
 def initialize_picamera2():
     """Inicializa a câmera usando Picamera2 (funciona no Pi 5)"""
@@ -188,7 +225,7 @@ def main():
 
     # --- GRAVAÇÃO DE VÍDEO (desative mudando para False) ---
     RECORD_VIDEO = True
-    video_writer = None
+    video_writer = _AsyncVideoWriter() if RECORD_VIDEO else None
     video_path = None
 
     print("\n" + "="*50)
@@ -269,22 +306,20 @@ def main():
             if RECORD_VIDEO:
                 face_visible = nose is not None
                 h, w = frame.shape[:2]
-                if face_visible and video_writer is None:
+                if face_visible and not video_writer.isOpened():
                     ts = time.strftime("%Y%m%d_%H%M%S")
                     video_path = os.path.join(SNAPSHOT_DIR, f"{ts}_video.avi")
                     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-                    video_writer = cv2.VideoWriter(video_path, fourcc, 20.0, (w, h))
-                    if not video_writer.isOpened():
+                    if not video_writer.open(video_path, fourcc, 20.0, (w, h)):
                         print(f"❌ Falha ao abrir VideoWriter: {video_path}")
-                        video_writer = None
+                        video_path = None
                     else:
                         print(f"🎥 Gravação iniciada: {video_path}")
-                elif not face_visible and video_writer is not None:
+                elif not face_visible and video_writer.isOpened():
                     video_writer.release()
                     print(f"🎥 Gravação encerrada: {video_path}")
-                    video_writer = None
                     video_path = None
-                if video_writer is not None:
+                if video_writer.isOpened():
                     video_writer.write(frame)
 
             # --- SALVA FRAME E LOG QUANDO HÁ ALERTAS ---
@@ -363,7 +398,7 @@ def main():
     finally:
         # --- LIMPEZA DE RECURSOS ---
         print("\n🧹 Limpando recursos...")
-        if video_writer is not None:
+        if video_writer is not None and video_writer.isOpened():
             video_writer.release()
             print(f"   ✓ Vídeo salvo: {video_path}")
         if picam2 is not None:
