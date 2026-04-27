@@ -1,3 +1,4 @@
+import csv
 import cv2
 import sys
 import os
@@ -6,6 +7,21 @@ import queue
 import threading
 import argparse
 import numpy as np
+
+_RISK_BEHAVIORS = [
+    "phone_call", "phone_use", "head_turn", "eye_rub",
+    "one_hand_raised", "two_hands_raised", "hands_busy_object",
+]
+_LOG_HEADER = [
+    "timestamp", "alerts", "score", "state", "snapshot",
+    "phone_call_secs", "phone_call_cnt",
+    "phone_use_secs",  "phone_use_cnt",
+    "head_turn_secs",  "head_turn_cnt",
+    "eye_rub_secs",    "eye_rub_cnt",
+    "one_hand_secs",   "one_hand_cnt",
+    "two_hands_secs",  "two_hands_cnt",
+    "hands_obj_secs",  "hands_obj_cnt",
+]
 
 # --- DETECÇÃO DE HARDWARE ---
 # No Raspberry Pi 5 com câmera CSI, NÃO use fallback para V4L2
@@ -217,6 +233,7 @@ def main():
     fps_update_time = time.time()
     fps_counter = 0
     last_snapshot_time = 0.0
+    last_snapshot_alerts = frozenset()   # avoid saving duplicate snapshots for the same alert set
     last_phone = None
     last_hands_busy = False
     DETECT_EVERY_N = 3  # run object detection every N frames (phone/hands)
@@ -227,6 +244,12 @@ def main():
     RECORD_VIDEO = True
     video_writer = _AsyncVideoWriter() if RECORD_VIDEO else None
     video_path = None
+    # Debounce: require consecutive frames before starting/stopping recording
+    # At ~20 FPS: START=15 ≈ 0.75 s,  STOP=50 ≈ 2.5 s
+    FACE_START_FRAMES = 15
+    FACE_STOP_FRAMES = 50
+    face_present_count = 0
+    face_absent_count = 0
 
     print("\n" + "="*50)
     print("🚀 MONITORAMENTO INICIADO")
@@ -302,11 +325,19 @@ def main():
             elif busy_count == 2:
                 alerts.append("2 MAOS OCUPADAS")
 
-            # --- GRAVAÇÃO DE VÍDEO QUANDO ROSTO DETECTADO ---
+            # --- GRAVAÇÃO DE VÍDEO COM DEBOUNCE ---
             if RECORD_VIDEO:
                 face_visible = nose is not None
                 h, w = frame.shape[:2]
-                if face_visible and not video_writer.isOpened():
+
+                if face_visible:
+                    face_present_count += 1
+                    face_absent_count = 0
+                else:
+                    face_absent_count += 1
+                    face_present_count = 0
+
+                if not video_writer.isOpened() and face_present_count >= FACE_START_FRAMES:
                     ts = time.strftime("%Y%m%d_%H%M%S")
                     video_path = os.path.join(SNAPSHOT_DIR, f"{ts}_video.avi")
                     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
@@ -315,25 +346,45 @@ def main():
                         video_path = None
                     else:
                         print(f"🎥 Gravação iniciada: {video_path}")
-                elif not face_visible and video_writer.isOpened():
+                elif video_writer.isOpened() and face_absent_count >= FACE_STOP_FRAMES:
                     video_writer.release()
                     print(f"🎥 Gravação encerrada: {video_path}")
                     video_path = None
+
                 if video_writer.isOpened():
                     video_writer.write(frame)
 
-            # --- SALVA FRAME E LOG QUANDO HÁ ALERTAS ---
+            # --- SALVA FRAME E LOG QUANDO HÁ ALERTAS NOVOS ---
             now = time.time()
-            if alerts and (now - last_snapshot_time) >= SNAPSHOT_COOLDOWN:
+            current_alerts = frozenset(alerts)
+            if not alerts:
+                last_snapshot_alerts = frozenset()  # reset so next occurrence is saved
+            elif current_alerts != last_snapshot_alerts and (now - last_snapshot_time) >= SNAPSHOT_COOLDOWN:
                 ts = time.strftime("%Y%m%d_%H%M%S")
                 tag = alerts[0].replace(" ", "_")
                 filename = os.path.join(SNAPSHOT_DIR, f"{ts}_{tag}.jpg")
                 cv2.imwrite(filename, frame)
-                log_file = os.path.join(SNAPSHOT_DIR, "eventos.dat")
-                with open(log_file, "a") as f:
-                    f.write(f"{ts},{', '.join(alerts)},{os.path.basename(filename)}\n")
+                log_file = os.path.join(SNAPSHOT_DIR, "eventos.csv")
+                dbg = risk_tracker.debug_info()
+                risk_cols = []
+                for b in _RISK_BEHAVIORS:
+                    risk_cols += [dbg[b]["active_secs"], dbg[b]["recent_count"]]
+                write_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
+                with open(log_file, "a", newline="") as f:
+                    w = csv.writer(f)
+                    if write_header:
+                        w.writerow(_LOG_HEADER)
+                    w.writerow([
+                        ts,
+                        "; ".join(alerts),
+                        f"{stable_score:.1f}",
+                        state,
+                        os.path.basename(filename),
+                        *risk_cols,
+                    ])
                 print(f"📸 Snapshot salvo: {filename}  [{', '.join(alerts)}]")
                 last_snapshot_time = now
+                last_snapshot_alerts = current_alerts
 
             # --- LOG DE DIAGNÓSTICO (a cada 30 frames) ---
             if frame_count % 30 == 0:
