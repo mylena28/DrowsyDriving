@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+venv/
+.venv/
+*.caffemodel
+*.prototxt
+*.pt
+*.onnx
+docker-compose.log
+.github/

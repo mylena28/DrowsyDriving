@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+venv/
+*.py[cod]
+*$py.class
+
+# --- Simulações e Dados (Engenharia) ---
+*.dat
+*.out
+*.bin
+*.log
+
+# --- Executáveis ---
+*.exe
+*.app
+*.o
+*.so
+
+# --- Modelos de IA Pesados ---
+*.caffemodel
+*.pt
+*.prototxt
+*.h5
+*.onnx
+*.weights
+
+# --- Scripts locais de deploy (contêm IPs/credenciais privadas) ---
+sync_to_pi.sh
+sync_*.sh
+
+# --- LaTeX (Para seus relatórios de Doutorado) ---
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+logs/
+*.avi
