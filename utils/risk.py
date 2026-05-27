@@ -71,6 +71,8 @@ class RiskTracker:
         "one_hand_raised":   dict(max_pts=15, ramp_secs=60,  decay_per_sec=0.10, freq_bonus=2.0),
         "two_hands_raised":  dict(max_pts=40, ramp_secs=60,  decay_per_sec=0.10, freq_bonus=5.0),
         "hands_busy_object": dict(max_pts=25, ramp_secs=30,  decay_per_sec=0.30, freq_bonus=3.0),
+        "no_seatbelt":       dict(max_pts=50, ramp_secs=5,   decay_per_sec=0.50, freq_bonus=0.0),
+        "smoking":           dict(max_pts=30, ramp_secs=20,  decay_per_sec=0.50, freq_bonus=3.0),
     }
 
     def __init__(self):

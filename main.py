@@ -11,6 +11,7 @@ import numpy as np
 _RISK_BEHAVIORS = [
     "phone_call", "phone_use", "head_turn", "eye_rub",
     "one_hand_raised", "two_hands_raised", "hands_busy_object",
+    "no_seatbelt", "smoking",
 ]
 _LOG_HEADER = [
     "timestamp", "alerts", "score", "state", "snapshot",
@@ -21,6 +22,8 @@ _LOG_HEADER = [
     "one_hand_secs",   "one_hand_cnt",
     "two_hands_secs",  "two_hands_cnt",
     "hands_obj_secs",  "hands_obj_cnt",
+    "no_seatbelt_secs", "no_seatbelt_cnt",
+    "smoking_secs",     "smoking_cnt",
 ]
 
 # --- DETECÇÃO DE HARDWARE ---
@@ -49,6 +52,8 @@ else:
 # Importação dos módulos locais (Detectores e Lógicas)
 from detectors.object_detector import detect_objects
 from detectors.pose_detector import PoseDetector
+from detectors.seatbelt_detector import SeatbeltDetector
+from detectors.smoking_detector import SmokingDetector
 from behaviors.head_turn import HeadTurnDetector
 from behaviors.eye_rub import EyeRubDetector
 from behaviors.phone_usage import PhoneStateDetector
@@ -67,6 +72,8 @@ hand_busy_detector = HandBusyDetector()
 # Modelos YOLO carregados globalmente para economizar memória no Pi 5
 model = YOLOOnnx("yolov8n.onnx")
 pose_detector = PoseDetector("yolov8n-pose.onnx")
+seatbelt_detector = SeatbeltDetector()
+smoking_detector  = SmokingDetector()
 
 class _AsyncVideoWriter:
     """Encodes and writes frames in a background thread so the main loop never blocks on disk I/O."""
@@ -236,7 +243,10 @@ def main():
     last_snapshot_alerts = frozenset()   # avoid saving duplicate snapshots for the same alert set
     last_phone = None
     last_hands_busy = False
-    DETECT_EVERY_N = 3  # run object detection every N frames (phone/hands)
+    last_seatbelt_on = True   # assume wearing until first detection
+    last_smoking = False
+    DETECT_EVERY_N = 3        # object detection interval (phone/hands)
+    DETECT_SLOW_N = 15        # seatbelt/smoking interval (changes slowly)
     SNAPSHOT_COOLDOWN = 5.0  # seconds between snapshots
     SNAPSHOT_DIR = os.path.join(os.path.dirname(__file__), "logs")
 
@@ -286,6 +296,13 @@ def main():
                 last_phone, last_hands_busy = detect_objects(
                     frame, model, nose, eye_l, eye_r, hands)
             phone, hands_busy = last_phone, last_hands_busy
+
+            # Seatbelt / smoking checked at a slower cadence, only when face is visible.
+            if nose is not None and frame_count % DETECT_SLOW_N == 0:
+                last_seatbelt_on = seatbelt_detector.detect(frame)
+                last_smoking     = smoking_detector.detect(frame)
+            seatbelt_on = last_seatbelt_on if nose is not None else True
+            smoking     = last_smoking     if nose is not None else False
             head_turned = head_turn_detector.update(nose, eye_l, eye_r)
             eye_rubbing = eye_rub_detector.update(hands, eye_l, eye_r)
             phone_state = phone_detector.update(phone, nose, eye_l, eye_r)
@@ -302,6 +319,8 @@ def main():
                 "one_hand_raised":   busy_count == 1,
                 "two_hands_raised":  busy_count == 2,
                 "hands_busy_object": hands_busy,
+                "no_seatbelt":       not seatbelt_on,
+                "smoking":           smoking,
             }
             stable_score = risk_tracker.update(events, frame_start)
             state = classify_from_score(stable_score)
@@ -324,6 +343,10 @@ def main():
                 alerts.append("1 MAO OCUPADA")
             elif busy_count == 2:
                 alerts.append("2 MAOS OCUPADAS")
+            if not seatbelt_on:
+                alerts.append("NO SEATBELT")
+            if smoking:
+                alerts.append("SMOKING")
 
             # --- GRAVAÇÃO DE VÍDEO COM DEBOUNCE ---
             if RECORD_VIDEO:
@@ -426,6 +449,10 @@ def main():
                     display_alerts.append("1 MAO LEVANTADA")
                 elif busy_count == 2:
                     display_alerts.append("2 MAOS LEVANTADAS")
+                if not seatbelt_on:
+                    display_alerts.append("SEM CINTO DE SEGURANCA")
+                if smoking:
+                    display_alerts.append("FUMANDO")
 
                 display_frame = draw_status(frame, state, stable_score, display_alerts)
                 cv2.imshow("Monitoramento DrowsyDriving", display_frame)
