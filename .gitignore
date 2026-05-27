@@ -21,7 +21,7 @@ venv/
 *.pt
 *.prototxt
 *.h5
-*.onnx
+#*.onnx
 *.weights
 
 # --- Scripts locais de deploy (contêm IPs/credenciais privadas) ---
