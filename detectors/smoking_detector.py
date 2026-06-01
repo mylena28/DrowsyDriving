@@ -17,7 +17,7 @@ class SmokingDetector:
     def __init__(
         self,
         model_path: str = os.path.join(_BASE, "smoking_detection.onnx"),
-        conf: float = 0.45,
+        conf: float = 0.55,
     ):
         self.model = YOLOOnnx(model_path)
         self.conf = conf

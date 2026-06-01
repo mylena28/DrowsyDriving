@@ -244,6 +244,8 @@ def main():
     last_hands_busy = False
     last_seatbelt_on = True   # assume wearing until first detection
     last_smoking = False
+    smoking_hit_count = 0     # consecutive positive smoking detections
+    SMOKING_CONFIRM_N = 2     # hits in a row required before alert fires
     DETECT_EVERY_N = 3        # object detection interval (phone/hands)
     DETECT_SLOW_N = 15        # seatbelt/smoking interval (changes slowly)
     SNAPSHOT_COOLDOWN = 5.0  # seconds between snapshots
@@ -300,7 +302,11 @@ def main():
             if nose is not None and frame_count % DETECT_SLOW_N == 0:
                 last_seatbelt_on = seatbelt_detector.detect(frame)
                 face_crop = lower_face_crop(frame, nose, eye_l, eye_r)
-                last_smoking     = smoking_detector.detect(face_crop)
+                if smoking_detector.detect(face_crop):
+                    smoking_hit_count += 1
+                else:
+                    smoking_hit_count = 0
+                last_smoking = smoking_hit_count >= SMOKING_CONFIRM_N
             seatbelt_on = last_seatbelt_on if nose is not None else True
             smoking     = last_smoking     if nose is not None else False
             head_turned = head_turn_detector.update(nose, eye_l, eye_r)
