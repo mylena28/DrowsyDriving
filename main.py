@@ -61,6 +61,7 @@ from behaviors.hand_busy import HandBusyDetector
 from utils.display import draw_status
 from utils.risk import RiskTracker
 from utils.classifier import classify_from_score
+from utils.geometry import lower_face_crop
 from detectors.yolo_onnx import YOLOOnnx
 
 # Instâncias dos detectores corporais
@@ -118,7 +119,7 @@ def initialize_picamera2():
         # Configuração otimizada para o Pi 5
         config = picam2.create_video_configuration(
             main={
-                "format": 'RGB888',      # Formato compatível com OpenCV
+                "format": 'BGR888',      # BGR byte order — matches OpenCV natively
                 "size": (640, 480)       # Resolução balanceada para performance
             },
             controls={
@@ -140,7 +141,7 @@ def initialize_picamera2():
             raise Exception("Frame de teste vazio")
 
         print("✅ Picamera2 inicializada com sucesso!")
-        print(f"   Resolução: 640x480 | Formato: RGB888 | FPS: 30")
+        print(f"   Resolução: 640x480 | Formato: BGR888 | FPS: 30")
         return picam2, True
 
     except Exception as e:
@@ -202,9 +203,7 @@ def main():
         if success:
             # Função que retorna frame já em formato BGR para o OpenCV
             def get_frame_picamera2():
-                frame_rgb = picam2.capture_array()
-                # Converte RGB para BGR (OpenCV usa BGR)
-                return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                return picam2.capture_array()  # BGR888 → already BGR for OpenCV
             get_frame = get_frame_picamera2
         else:
             print("\n⚠️  Picamera2 falhou. Tentando fallback...")
@@ -300,7 +299,8 @@ def main():
             # Seatbelt / smoking checked at a slower cadence, only when face is visible.
             if nose is not None and frame_count % DETECT_SLOW_N == 0:
                 last_seatbelt_on = seatbelt_detector.detect(frame)
-                last_smoking     = smoking_detector.detect(frame)
+                face_crop = lower_face_crop(frame, nose, eye_l, eye_r)
+                last_smoking     = smoking_detector.detect(face_crop)
             seatbelt_on = last_seatbelt_on if nose is not None else True
             smoking     = last_smoking     if nose is not None else False
             head_turned = head_turn_detector.update(nose, eye_l, eye_r)
