@@ -1,3 +1,6 @@
+import ultralytics.utils.downloads as _downloads
+_downloads.check_disk_space = lambda *a, **k: None  # overlayfs do BuildKit reporta 0 MB (falso positivo)
+
 from ultralytics import YOLO
 
 # imgsz=320 cuts inference time roughly in half vs the default 640,

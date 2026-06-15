@@ -28,7 +28,6 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     onnxruntime
 
 COPY export_models.py .
-COPY *.pt ./
 
 RUN python3 export_models.py
 
