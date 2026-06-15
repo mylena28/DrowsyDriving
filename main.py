@@ -111,10 +111,10 @@ class _AsyncVideoWriter:
         return self._writer is not None and self._writer.isOpened()
 
 
-def initialize_picamera2():
+def initialize_picamera2(camera_num=1):
     """Inicializa a câmera usando Picamera2 (funciona no Pi 5)"""
     try:
-        picam2 = Picamera2()
+        picam2 = Picamera2(camera_num=camera_num)
 
         # Configuração otimizada para o Pi 5
         config = picam2.create_video_configuration(
@@ -191,6 +191,8 @@ def main():
     parser = argparse.ArgumentParser(description="DrowsyDriving Monitor")
     parser.add_argument("--venv", action="store_true",
                         help="Modo venv: abre janela com câmera e diagnóstico em texto (sem caixas)")
+    parser.add_argument("--camera", type=int, default=1,
+                        help="Índice da câmera Picamera2 a usar (padrão: 1)")
     args = parser.parse_args()
 
     # --- INICIALIZAÇÃO DA CÂMERA ---
@@ -199,7 +201,8 @@ def main():
 
     if PICAMERA_AVAILABLE and IS_RASPBERRY_PI:
         # PRIORIDADE 1: Picamera2 (funciona com câmera CSI no Pi 5)
-        picam2, success = initialize_picamera2()
+        print(f"📷 Usando câmera {args.camera}")
+        picam2, success = initialize_picamera2(camera_num=args.camera)
         if success:
             # Função que retorna frame já em formato BGR para o OpenCV
             def get_frame_picamera2():
