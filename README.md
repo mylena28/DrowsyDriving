@@ -222,3 +222,21 @@ DrowsyDriving/
 ├── utils/                  # Shared utilities
 └── logs/                   # Mounted log volume (Docker)
 ```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## Acknowledgements
+
+This project is developed in partnership with:
+
+- **[FAPEG](https://www.fapeg.go.gov.br)** — Fundação de Amparo à Pesquisa do Estado de Goiás
+- **IEL/GO** — Instituto Euvaldo Lodi — Núcleo Regional Goiás
+- **Salte Tecnologia**
+
+The research is supported by FAPEG under the *Segurança na Operação de Equipamentos Móveis* program (Edital 27/2025).
