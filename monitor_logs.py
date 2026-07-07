@@ -10,7 +10,6 @@ Modos de uso:
 
 import argparse
 import csv
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -77,6 +76,48 @@ def collect(interval: int, output: Path, logs_dir: Path) -> None:
 
 # ─── PLOT ────────────────────────────────────────────────────────────────────
 
+def _load_rows(input_file: Path) -> list[dict]:
+    rows = []
+    with open(input_file, newline="") as f:
+        for row in csv.DictReader(f):
+            rows.append({k: float(v) if k != "timestamp" else v for k, v in row.items()})
+    if not rows:
+        raise SystemExit("Arquivo de dados vazio.")
+    return rows
+
+
+def _plot_size_panel(ax, elapsed: list[float], total_mb: list[float], ticker) -> None:
+    ax.fill_between(elapsed, total_mb, alpha=0.25, color="steelblue")
+    ax.plot(elapsed, total_mb, color="steelblue", linewidth=1.8, label="Tamanho total")
+    ax.set_ylabel("Tamanho (MB)")
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f MB"))
+    ax.legend(loc="upper left")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    if total_mb:
+        ax.annotate(
+            f"{total_mb[-1]:.2f} MB",
+            xy=(elapsed[-1], total_mb[-1]),
+            xytext=(-40, 8), textcoords="offset points",
+            fontsize=8, color="steelblue",
+        )
+
+
+def _plot_file_count_panel(
+    ax, elapsed: list[float], n_jpg: list[float], n_avi: list[float], ticker,
+) -> None:
+    ax.step(elapsed, n_jpg, where="post", color="darkorange", linewidth=1.5, label="Snapshots (.jpg)")
+    ax.step(elapsed, n_avi, where="post", color="crimson", linewidth=1.5, label="Vídeos (.avi)",
+            linestyle="--")
+    ax.set_ylabel("Quantidade de arquivos")
+    ax.set_xlabel("Tempo de execução (min)")
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    ax.legend(loc="upper left")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    # eixo X em minutos com marca a cada 5 min
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(5))
+    ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("%g min"))
+
+
 def plot(input_file: Path, output_file: Path | None) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -84,53 +125,16 @@ def plot(input_file: Path, output_file: Path | None) -> None:
     except ImportError:
         raise SystemExit("matplotlib não encontrado. Instale com: pip install matplotlib")
 
-    rows = []
-    with open(input_file, newline="") as f:
-        for row in csv.DictReader(f):
-            rows.append({k: float(v) if k not in ("timestamp",) else v for k, v in row.items()})
-
-    if not rows:
-        raise SystemExit("Arquivo de dados vazio.")
-
-    elapsed  = [r["elapsed_s"] / 60 for r in rows]   # minutos
+    rows = _load_rows(input_file)
+    elapsed = [r["elapsed_s"] / 60 for r in rows]  # minutos
     total_mb = [r["total_kb"] / 1024 for r in rows]
-    n_jpg    = [r["n_jpg"]  for r in rows]
-    n_avi    = [r["n_avi"]  for r in rows]
+    n_jpg = [r["n_jpg"] for r in rows]
+    n_avi = [r["n_avi"] for r in rows]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     fig.suptitle("Crescimento da pasta logs durante execução Docker", fontsize=13, fontweight="bold")
-
-    # — painel superior: tamanho total —
-    ax1.fill_between(elapsed, total_mb, alpha=0.25, color="steelblue")
-    ax1.plot(elapsed, total_mb, color="steelblue", linewidth=1.8, label="Tamanho total")
-    ax1.set_ylabel("Tamanho (MB)")
-    ax1.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f MB"))
-    ax1.legend(loc="upper left")
-    ax1.grid(True, linestyle="--", alpha=0.5)
-
-    # adiciona rótulo do valor final
-    if total_mb:
-        ax1.annotate(
-            f"{total_mb[-1]:.2f} MB",
-            xy=(elapsed[-1], total_mb[-1]),
-            xytext=(-40, 8), textcoords="offset points",
-            fontsize=8, color="steelblue",
-        )
-
-    # — painel inferior: contagem de arquivos —
-    ax2.step(elapsed, n_jpg, where="post", color="darkorange", linewidth=1.5, label="Snapshots (.jpg)")
-    ax2.step(elapsed, n_avi, where="post", color="crimson",    linewidth=1.5, label="Vídeos (.avi)",
-             linestyle="--")
-    ax2.set_ylabel("Quantidade de arquivos")
-    ax2.set_xlabel("Tempo de execução (min)")
-    ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-    ax2.legend(loc="upper left")
-    ax2.grid(True, linestyle="--", alpha=0.5)
-
-    # eixo X em minutos com marca a cada 5 min
-    ax2.xaxis.set_major_locator(ticker.MultipleLocator(5))
-    ax2.xaxis.set_major_formatter(ticker.FormatStrFormatter("%g min"))
-
+    _plot_size_panel(ax1, elapsed, total_mb, ticker)
+    _plot_file_count_panel(ax2, elapsed, n_jpg, n_avi, ticker)
     plt.tight_layout()
 
     if output_file:
@@ -149,8 +153,17 @@ def main() -> None:
         epilog=__doc__,
     )
     sub = parser.add_subparsers(dest="mode", required=True)
+    _add_collect_subparser(sub)
+    _add_plot_subparser(sub)
 
-    # subcomando collect
+    args = parser.parse_args()
+    if args.mode == "collect":
+        _run_collect(args)
+    elif args.mode == "plot":
+        _run_plot(args)
+
+
+def _add_collect_subparser(sub: argparse._SubParsersAction) -> None:
     p_collect = sub.add_parser("collect", help="Coleta dados de crescimento da pasta logs")
     p_collect.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
                            metavar="SEG", help=f"Intervalo entre amostras em segundos (padrão: {DEFAULT_INTERVAL})")
@@ -159,24 +172,26 @@ def main() -> None:
     p_collect.add_argument("--logs-dir", type=Path, default=LOGS_DIR,
                            metavar="DIR", help=f"Pasta a monitorar (padrão: {LOGS_DIR})")
 
-    # subcomando plot
+
+def _add_plot_subparser(sub: argparse._SubParsersAction) -> None:
     p_plot = sub.add_parser("plot", help="Plota gráfico a partir dos dados coletados")
     p_plot.add_argument("--input", type=Path, default=DEFAULT_DATA_FILE,
                         metavar="ARQUIVO", help="CSV gerado pelo modo collect")
     p_plot.add_argument("--output", type=Path, default=None,
                         metavar="IMAGEM", help="Salva gráfico em arquivo PNG (opcional; padrão: exibe na tela)")
 
-    args = parser.parse_args()
 
-    if args.mode == "collect":
-        try:
-            collect(args.interval, args.output, args.logs_dir)
-        except KeyboardInterrupt:
-            print("\nColeta encerrada.")
-    elif args.mode == "plot":
-        if not args.input.exists():
-            raise SystemExit(f"Arquivo não encontrado: {args.input}\nRode primeiro: python monitor_logs.py collect")
-        plot(args.input, args.output)
+def _run_collect(args: argparse.Namespace) -> None:
+    try:
+        collect(args.interval, args.output, args.logs_dir)
+    except KeyboardInterrupt:
+        print("\nColeta encerrada.")
+
+
+def _run_plot(args: argparse.Namespace) -> None:
+    if not args.input.exists():
+        raise SystemExit(f"Arquivo não encontrado: {args.input}\nRode primeiro: python monitor_logs.py collect")
+    plot(args.input, args.output)
 
 
 if __name__ == "__main__":

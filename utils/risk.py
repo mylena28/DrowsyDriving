@@ -13,7 +13,7 @@ class BehaviorTracker:
 
     FREQUENCY_WINDOW = 300.0  # seconds (5 minutes)
 
-    def __init__(self, max_pts, ramp_secs, decay_per_sec, freq_bonus=3.0):
+    def __init__(self, max_pts: float, ramp_secs: float, decay_per_sec: float, freq_bonus: float = 3.0):
         self.max_pts = max_pts
         self.ramp_secs = ramp_secs
         self.decay_per_sec = decay_per_sec

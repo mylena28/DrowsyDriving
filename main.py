@@ -1,501 +1,368 @@
-import csv
-import cv2
-import sys
+"""Entry point: camera bootstrap + per-frame detection/alerting loop."""
+
+import argparse
 import os
 import time
-import queue
-import threading
-import argparse
+import traceback
+from dataclasses import dataclass, field
+from typing import Optional
+
+import cv2
 import numpy as np
 
-_RISK_BEHAVIORS = [
-    "phone_call", "phone_use", "head_turn", "eye_rub",
-    "one_hand_raised", "two_hands_raised", "hands_busy_object",
-    "no_seatbelt", "smoking",
-]
-_LOG_HEADER = [
-    "timestamp", "alerts", "score", "state", "snapshot",
-    "phone_call_secs", "phone_call_cnt",
-    "phone_use_secs",  "phone_use_cnt",
-    "head_turn_secs",  "head_turn_cnt",
-    "eye_rub_secs",    "eye_rub_cnt",
-    "one_hand_secs",   "one_hand_cnt",
-    "two_hands_secs",  "two_hands_cnt",
-    "hands_obj_secs",  "hands_obj_cnt",
-    "no_seatbelt_secs", "no_seatbelt_cnt",
-    "smoking_secs",     "smoking_cnt",
-]
-
-# --- DETECÇÃO DE HARDWARE ---
-# No Raspberry Pi 5 com câmera CSI, NÃO use fallback para V4L2
-# pois o OpenCV não consegue ler diretamente. Use APENAS Picamera2.
-PICAMERA_AVAILABLE = False
-picam2 = None
-
-# Verifica se está em ambiente Raspberry Pi com libcamera
-IS_RASPBERRY_PI = os.path.exists('/usr/bin/rpicam-hello') or os.path.exists('/usr/bin/libcamera-hello')
-
-if IS_RASPBERRY_PI:
-    try:
-        from picamera2 import Picamera2
-        PICAMERA_AVAILABLE = True
-        print("✅ Ambiente Raspberry Pi 5 detectado. Usando Picamera2 (recomendado).")
-    except ImportError as e:
-        print(f"❌ Picamera2 não instalada: {e}")
-        print("   Instale com: pip install picamera2")
-        print("   Ou: sudo apt install python3-picamera2")
-        PICAMERA_AVAILABLE = False
-        sys.exit(1)
-else:
-    print("Ambiente não-RPi detectado. Usando OpenCV padrão (webcam USB).")
-
-# Importação dos módulos locais (Detectores e Lógicas)
+from behaviors.eye_rub import EyeRubDetector
+from behaviors.hand_busy import HandBusyDetector
+from behaviors.head_turn import HeadTurnDetector
+from behaviors.phone_usage import PhoneStateDetector
 from detectors.object_detector import detect_objects
 from detectors.pose_detector import PoseDetector
 from detectors.seatbelt_detector import SeatbeltDetector
 from detectors.smoking_detector import SmokingDetector
-from behaviors.head_turn import HeadTurnDetector
-from behaviors.eye_rub import EyeRubDetector
-from behaviors.phone_usage import PhoneStateDetector
-from behaviors.hand_busy import HandBusyDetector
-from utils.display import draw_status
-from utils.risk import RiskTracker
-from utils.classifier import classify_from_score
-from utils.geometry import lower_face_crop
 from detectors.yolo_onnx import YOLOOnnx
+from utils.camera import CameraSource, CameraUnavailableError, IS_RASPBERRY_PI, open_camera
+from utils.classifier import classify_from_score
+from utils.display import draw_status
+from utils.event_log import SnapshotLogger
+from utils.geometry import lower_face_crop
+from utils.risk import RiskTracker
+from utils.video_writer import DebouncedRecorder
 
-# Instâncias dos detectores corporais
-head_turn_detector = HeadTurnDetector(frames_threshold=5)
-eye_rub_detector = EyeRubDetector(frames_threshold=5)
-phone_detector = PhoneStateDetector(call_frames_threshold=8)
-hand_busy_detector = HandBusyDetector()
+TARGET_FRAME_SECONDS = 0.033   # ~30 FPS cap, sustainable on a Pi 5 with no GPU
+DETECT_EVERY_N = 3             # object detection cadence (phone/hands)
+DETECT_SLOW_N = 15             # seatbelt/smoking cadence (changes slowly)
+SMOKING_CONFIRM_N = 2          # consecutive positive hits required before the alert fires
+DIAGNOSTIC_LOG_EVERY_N = 30
+SNAPSHOT_COOLDOWN_SECONDS = 5.0
+RECORD_VIDEO = True
 
-# Modelos YOLO carregados globalmente para economizar memória no Pi 5
-model = YOLOOnnx("yolov8n.onnx")
-pose_detector = PoseDetector("yolov8n-pose.onnx")
-seatbelt_detector = SeatbeltDetector()
-smoking_detector  = SmokingDetector()
 
-class _AsyncVideoWriter:
-    """Encodes and writes frames in a background thread so the main loop never blocks on disk I/O."""
+class Detectors:
+    """Bundles every model/behavior instance the frame loop needs.
+
+    Built once, after the camera is confirmed working, and passed down
+    explicitly to FrameProcessor rather than read from module globals.
+    """
 
     def __init__(self):
-        self._writer = None
-        self._q = queue.Queue(maxsize=10)
-        threading.Thread(target=self._worker, daemon=True).start()
-
-    def _worker(self):
-        while True:
-            writer, frame = self._q.get()
-            writer.write(frame)
-            self._q.task_done()
-
-    def open(self, path, fourcc, fps, size):
-        self._writer = cv2.VideoWriter(path, fourcc, fps, size)
-        return self._writer.isOpened()
-
-    def write(self, frame):
-        if self._writer is not None:
-            try:
-                self._q.put_nowait((self._writer, frame.copy()))
-            except queue.Full:
-                pass  # drop frame rather than stall the main loop
-
-    def release(self):
-        if self._writer is not None:
-            self._q.join()  # flush all pending frames before closing
-            self._writer.release()
-            self._writer = None
-
-    def isOpened(self):
-        return self._writer is not None and self._writer.isOpened()
+        self.object_model = YOLOOnnx("yolov8n.onnx")
+        self.pose = PoseDetector("yolov8n-pose.onnx")
+        self.seatbelt = SeatbeltDetector()
+        self.smoking = SmokingDetector()
+        self.head_turn = HeadTurnDetector(frames_threshold=5)
+        self.eye_rub = EyeRubDetector(frames_threshold=5)
+        self.phone = PhoneStateDetector(call_frames_threshold=8)
+        self.hand_busy = HandBusyDetector()
 
 
-def initialize_picamera2(camera_num=1):
-    """Inicializa a câmera usando Picamera2 (funciona no Pi 5)"""
-    try:
-        picam2 = Picamera2(camera_num=camera_num)
+class SlowDetectionState:
+    """Holds the seatbelt/smoking readings between their slow-cadence
+    (DETECT_SLOW_N-frame) detection passes."""
 
-        # Configuração otimizada para o Pi 5
-        config = picam2.create_video_configuration(
-            main={
-                "format": 'BGR888',      # BGR byte order — matches OpenCV natively
-                "size": (640, 480)       # Resolução balanceada para performance
-            },
-            controls={
-                "FrameRate": 30.0,       # Limita FPS para estabilidade
-                "AwbMode": 0,            # Auto white balance
-                "AnalogueGain": 1.0      # Ganho padrão
-            }
+    def __init__(self):
+        self.seatbelt_on = True   # assume wearing until first detection
+        self.smoking = False
+        self._smoking_hit_count = 0
+
+    def update(self, frame: np.ndarray, nose, eye_l, eye_r, detectors: Detectors) -> None:
+        self.seatbelt_on = detectors.seatbelt.detect(frame)
+        face_crop = lower_face_crop(frame, nose, eye_l, eye_r)
+        if detectors.smoking.detect(face_crop):
+            self._smoking_hit_count += 1
+        else:
+            self._smoking_hit_count = 0
+        self.smoking = self._smoking_hit_count >= SMOKING_CONFIRM_N
+
+
+@dataclass
+class FrameResult:
+    frame_count: int
+    nose: Optional[np.ndarray]
+    stable_score: float
+    state: str
+    alerts: list = field(default_factory=list)
+    display_alerts: list = field(default_factory=list)
+    risk_debug: dict = field(default_factory=dict)
+
+
+# (log_label, display_label) pairs, in priority order, for each alert condition.
+def _active_alert_specs(
+    phone, phone_state: str, head_turned: bool, eye_rubbing: bool,
+    hands_busy: bool, busy_count: int, seatbelt_on: bool, smoking: bool,
+) -> list[tuple[str, str]]:
+    specs = []
+    if head_turned:
+        specs.append(("HEAD TURN", "VIRANDO A CABECA"))
+    if eye_rubbing:
+        specs.append(("EYE RUBBING", "ESFREGANDO OS OLHOS"))
+    if phone is not None:
+        specs.append(("PHONE DETECTED", "CELULAR DETECTADO"))
+    if phone_state == "EM LIGACAO":
+        specs.append(("ON CALL", "EM LIGACAO"))
+    elif phone_state == "USANDO CELULAR":
+        specs.append(("PHONE IN USE", "USANDO CELULAR"))
+    if hands_busy:
+        specs.append(("HANDS BUSY", "MAOS OCUPADAS"))
+    if busy_count == 1:
+        specs.append(("1 MAO OCUPADA", "1 MAO LEVANTADA"))
+    elif busy_count == 2:
+        specs.append(("2 MAOS OCUPADAS", "2 MAOS LEVANTADAS"))
+    if not seatbelt_on:
+        specs.append(("NO SEATBELT", "SEM CINTO DE SEGURANCA"))
+    if smoking:
+        specs.append(("SMOKING", "FUMANDO"))
+    return specs
+
+
+class FrameProcessor:
+    """Runs one frame through pose/object/behavior detection and risk
+    scoring. Owns the inter-frame state that used to live as loop-local
+    variables in main(): the last object-detection result (reused between
+    DETECT_EVERY_N cadence steps) and the slow seatbelt/smoking readings.
+    """
+
+    def __init__(self, detectors: Detectors):
+        self._detectors = detectors
+        self._risk_tracker = RiskTracker()
+        self._slow_state = SlowDetectionState()
+        self._last_phone = None
+        self._last_hands_busy = False
+        self.frame_count = 0
+
+    def process(self, frame: np.ndarray, timestamp: float) -> FrameResult:
+        self.frame_count += 1
+        pose_data = self._detectors.pose.update(frame)
+        nose, eye_l, eye_r = pose_data["nose"], pose_data["eye_l"], pose_data["eye_r"]
+        hands, hand_l, hand_r = pose_data["hands"], pose_data["hand_l"], pose_data["hand_r"]
+
+        phone, hands_busy = self._detect_phone_and_hands(frame, nose, eye_l, eye_r, hands)
+        seatbelt_on, smoking = self._detect_seatbelt_and_smoking(frame, nose, eye_l, eye_r)
+
+        head_turned = self._detectors.head_turn.update(nose, eye_l, eye_r)
+        eye_rubbing = self._detectors.eye_rub.update(hands, eye_l, eye_r)
+        phone_state = self._detectors.phone.update(phone, nose, eye_l, eye_r)
+        busy_count = self._count_busy_hands(hand_l, hand_r, eye_l, eye_r, nose)
+
+        events = _risk_events(phone_state, head_turned, eye_rubbing,
+                               busy_count, hands_busy, seatbelt_on, smoking)
+        stable_score = self._risk_tracker.update(events, timestamp)
+        state = classify_from_score(stable_score)
+
+        specs = _active_alert_specs(phone, phone_state, head_turned, eye_rubbing,
+                                     hands_busy, busy_count, seatbelt_on, smoking)
+        return FrameResult(
+            frame_count=self.frame_count,
+            nose=nose,
+            stable_score=stable_score,
+            state=state,
+            alerts=[log for log, _ in specs],
+            display_alerts=[disp for _, disp in specs],
+            risk_debug=self._risk_tracker.debug_info(),
         )
 
-        picam2.configure(config)
-        picam2.start()
+    def _detect_phone_and_hands(self, frame, nose, eye_l, eye_r, hands):
+        """Object detection runs every DETECT_EVERY_N frames; phone/hand
+        state changes slowly enough that stale reads are fine in between."""
+        if self.frame_count % DETECT_EVERY_N == 0:
+            self._last_phone, self._last_hands_busy = detect_objects(
+                frame, self._detectors.object_model, nose, eye_l, eye_r, hands)
+        return self._last_phone, self._last_hands_busy
 
-        # Aguarda a câmera estabilizar (crítico para o Pi 5)
-        time.sleep(2.0)
+    def _detect_seatbelt_and_smoking(self, frame, nose, eye_l, eye_r):
+        """Seatbelt/smoking are checked at a slower cadence, only when a
+        face is visible; assume compliant/absent while no face is found."""
+        if nose is not None and self.frame_count % DETECT_SLOW_N == 0:
+            self._slow_state.update(frame, nose, eye_l, eye_r, self._detectors)
+        if nose is None:
+            return True, False
+        return self._slow_state.seatbelt_on, self._slow_state.smoking
 
-        # Testa se realmente captura frames
-        test_frame = picam2.capture_array()
-        if test_frame is None or test_frame.size == 0:
-            raise Exception("Frame de teste vazio")
+    def _count_busy_hands(self, hand_l, hand_r, eye_l, eye_r, nose) -> int:
+        hand_l_busy, hand_r_busy = self._detectors.hand_busy.update(
+            hand_l, hand_r, eye_l, eye_r, nose)
+        return int(hand_l_busy) + int(hand_r_busy)
 
-        print("✅ Picamera2 inicializada com sucesso!")
-        print(f"   Resolução: 640x480 | Formato: BGR888 | FPS: 30")
-        return picam2, True
 
-    except Exception as e:
-        print(f"❌ Erro ao inicializar Picamera2: {e}")
-        print("\n📋 Diagnóstico rápido:")
-        print("   1. Verifique o cabo da câmera:")
-        print("      libcamera-hello --list-cameras")
-        print("   2. Teste a câmera manualmente:")
-        print("      libcamera-hello -t 5")
-        print("   3. Reinicie o serviço de câmera:")
-        print("      sudo systemctl restart rpicam-apps")
-        return None, False
+def _risk_events(
+    phone_state: str, head_turned: bool, eye_rubbing: bool,
+    busy_count: int, hands_busy: bool, seatbelt_on: bool, smoking: bool,
+) -> dict:
+    return {
+        "phone_call": phone_state == "EM LIGACAO",
+        "phone_use": phone_state == "USANDO CELULAR",
+        "head_turn": head_turned,
+        "eye_rub": eye_rubbing,
+        "one_hand_raised": busy_count == 1,
+        "two_hands_raised": busy_count == 2,
+        "hands_busy_object": hands_busy,
+        "no_seatbelt": not seatbelt_on,
+        "smoking": smoking,
+    }
 
-def initialize_opencv_fallback():
-    """Fallback para OpenCV (webcams USB ou outros sistemas)"""
-    try:
-        # Tenta diferentes índices de câmera
-        for camera_index in [0, 1, 2]:
-            cap = cv2.VideoCapture(camera_index)
-            if cap.isOpened():
-                print(f"✅ Câmera encontrada no índice {camera_index}")
 
-                # Configurações otimizadas
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                cap.set(cv2.CAP_PROP_FPS, 30)
+class FpsCounter:
+    """Tracks frames-per-second averaged over a window, reset on sampling."""
 
-                # Testa se realmente captura
-                ret, test_frame = cap.read()
-                if ret and test_frame is not None:
-                    print("✅ Fallback OpenCV funcionando")
-                    return cap, True
-                else:
-                    print(f"⚠️  Câmera índice {camera_index} não produz frames")
-                    cap.release()
+    def __init__(self):
+        self._count = 0
+        self._window_start = time.time()
 
-        print("❌ Nenhuma câmera encontrada no sistema")
-        return None, False
+    def tick(self) -> None:
+        self._count += 1
 
-    except Exception as e:
-        print(f"❌ Erro no fallback OpenCV: {e}")
-        return None, False
+    def sample_and_reset(self) -> float:
+        elapsed = time.time() - self._window_start
+        fps = self._count / elapsed if elapsed > 0 else 0.0
+        self._count = 0
+        self._window_start = time.time()
+        return fps
 
-def main():
-    global picam2, PICAMERA_AVAILABLE
 
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="DrowsyDriving Monitor")
-    parser.add_argument("--venv", action="store_true",
-                        help="Modo venv: abre janela com câmera e diagnóstico em texto (sem caixas)")
-    parser.add_argument("--camera", type=int, default=1,
-                        help="Índice da câmera Picamera2 a usar (padrão: 1)")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--venv", action="store_true",
+        help="Modo venv: abre janela com câmera e diagnóstico em texto (sem caixas)",
+    )
+    parser.add_argument(
+        "--camera", type=int, default=1,
+        help="Índice da câmera Picamera2 a usar (padrão: 1)",
+    )
+    return parser.parse_args()
 
-    # --- INICIALIZAÇÃO DA CÂMERA ---
-    cap_opencv = None
-    get_frame = None
 
-    if PICAMERA_AVAILABLE and IS_RASPBERRY_PI:
-        # PRIORIDADE 1: Picamera2 (funciona com câmera CSI no Pi 5)
-        print(f"📷 Usando câmera {args.camera}")
-        picam2, success = initialize_picamera2(camera_num=args.camera)
-        if success:
-            # Função que retorna frame já em formato BGR para o OpenCV
-            def get_frame_picamera2():
-                return picam2.capture_array()  # BGR888 → already BGR for OpenCV
-            get_frame = get_frame_picamera2
-        else:
-            print("\n⚠️  Picamera2 falhou. Tentando fallback...")
-            PICAMERA_AVAILABLE = False
+def _print_diagnostics(result: FrameResult, current_fps: float) -> None:
+    alert_str = ", ".join(result.alerts) if result.alerts else "none"
+    active_debug = {
+        k: v for k, v in result.risk_debug.items()
+        if v["active_secs"] > 0 or v["recent_count"] > 0
+    }
+    print(f"[{result.frame_count:06d}] FPS: {current_fps:.1f} | "
+          f"Face: {'YES' if result.nose is not None else 'NO ':>3} | "
+          f"Score: {result.stable_score:5.1f} | "
+          f"State: {result.state} | "
+          f"Alerts: {alert_str} | "
+          f"Risk detail: {active_debug}")
 
-    if not PICAMERA_AVAILABLE or get_frame is None:
-        # PRIORIDADE 2: OpenCV (para webcams USB ou ambiente não-RPi)
-        cap_opencv, success = initialize_opencv_fallback()
-        if success:
-            get_frame = lambda: cap_opencv.read()[1]
-        else:
-            print("\n❌ ERRO CRÍTICO: Nenhuma câmera disponível.")
-            print("   Soluções possíveis:")
-            print("   1. Raspberry Pi 5 com câmera CSI:")
-            print("      - Use Picamera2 (não use fallback V4L2)")
-            print("      - Verifique: libcamera-hello --list-cameras")
-            print("   2. Webcam USB:")
-            print("      - Verifique conexão: lsusb")
-            print("      - Teste: cheese ou guvcview")
-            return
 
-    # --- INÍCIO DO MONITORAMENTO ---
-    risk_tracker = RiskTracker()
+def _show_frame(frame: np.ndarray, result: FrameResult) -> bool:
+    """Renders the debug overlay window. Returns False if the user pressed 'q'."""
+    display_frame = draw_status(frame, result.state, result.display_alerts)
+    cv2.imshow("Monitoramento DrowsyDriving", display_frame)
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        print("\n⏸️  Interrompido pelo usuário (tecla Q)")
+        return False
+    return True
 
-    # Define se deve mostrar janela gráfica
-    # --venv força a janela mesmo sem DISPLAY no env (modo local com venv)
-    SHOW_DISPLAY = args.venv or ("DISPLAY" in os.environ and not IS_RASPBERRY_PI)
 
+def _throttle_to_target_fps(frame_start: float) -> None:
+    frame_time = time.time() - frame_start
+    if frame_time < TARGET_FRAME_SECONDS:
+        time.sleep(TARGET_FRAME_SECONDS - frame_time)
+
+
+def _run_one_frame(
+    camera: CameraSource,
+    frame_processor: FrameProcessor,
+    fps_counter: FpsCounter,
+    snapshot_logger: SnapshotLogger,
+    recorder: Optional[DebouncedRecorder],
+    show_display: bool,
+) -> bool:
+    """Processes one frame. Returns False if the loop should stop (the user
+    pressed 'q' in the display window)."""
+    frame_start = time.time()
+    frame = camera.read()
+    if frame is None:
+        print("⚠️  Frame perdido. Tentando recuperar...")
+        time.sleep(0.05)
+        return True
+
+    fps_counter.tick()
+    result = frame_processor.process(frame, frame_start)
+    _record_and_log(frame, result, recorder, snapshot_logger)
+
+    if result.frame_count % DIAGNOSTIC_LOG_EVERY_N == 0:
+        _print_diagnostics(result, fps_counter.sample_and_reset())
+
+    if show_display and not _show_frame(frame, result):
+        return False
+
+    _throttle_to_target_fps(frame_start)
+    return True
+
+
+def _record_and_log(
+    frame: np.ndarray,
+    result: FrameResult,
+    recorder: Optional[DebouncedRecorder],
+    snapshot_logger: SnapshotLogger,
+) -> None:
+    if recorder is not None:
+        recorder.update(frame, face_visible=result.nose is not None)
+    snapshot_logger.maybe_log(
+        frame, result.alerts, result.stable_score, result.state, result.risk_debug)
+
+
+def _cleanup(camera: CameraSource, recorder: Optional[DebouncedRecorder]) -> None:
+    print("\n🧹 Limpando recursos...")
+    if recorder is not None and recorder.isOpened():
+        video_path = recorder.video_path
+        recorder.release()
+        print(f"   ✓ Vídeo salvo: {video_path}")
+    camera.release()
+    print(f"   ✓ Câmera liberada ({camera.backend})")
+    cv2.destroyAllWindows()
+    print("\n✅ Programa encerrado com sucesso!")
+
+
+def _build_session(
+    args: argparse.Namespace,
+) -> tuple[FrameProcessor, FpsCounter, SnapshotLogger, Optional[DebouncedRecorder]]:
+    frame_processor = FrameProcessor(Detectors())
+    fps_counter = FpsCounter()
+
+    snapshot_dir = os.path.join(os.path.dirname(__file__), "logs")
+    os.makedirs(snapshot_dir, exist_ok=True)
+    snapshot_logger = SnapshotLogger(snapshot_dir, cooldown_secs=SNAPSHOT_COOLDOWN_SECONDS)
+    recorder = DebouncedRecorder(snapshot_dir) if RECORD_VIDEO else None
+    return frame_processor, fps_counter, snapshot_logger, recorder
+
+
+def run_monitoring_loop(camera: CameraSource, args: argparse.Namespace) -> None:
+    frame_processor, fps_counter, snapshot_logger, recorder = _build_session(args)
+    show_display = args.venv or ("DISPLAY" in os.environ and not IS_RASPBERRY_PI)
     if args.venv:
         print("🖥️  Modo venv ativado: exibindo câmera com diagnóstico em tela")
 
-    frame_count = 0
-    fps_update_time = time.time()
-    fps_counter = 0
-    last_snapshot_time = 0.0
-    last_snapshot_alerts = frozenset()   # avoid saving duplicate snapshots for the same alert set
-    last_phone = None
-    last_hands_busy = False
-    last_seatbelt_on = True   # assume wearing until first detection
-    last_smoking = False
-    smoking_hit_count = 0     # consecutive positive smoking detections
-    SMOKING_CONFIRM_N = 2     # hits in a row required before alert fires
-    DETECT_EVERY_N = 3        # object detection interval (phone/hands)
-    DETECT_SLOW_N = 15        # seatbelt/smoking interval (changes slowly)
-    SNAPSHOT_COOLDOWN = 5.0  # seconds between snapshots
-    SNAPSHOT_DIR = os.path.join(os.path.dirname(__file__), "logs")
-
-    # --- GRAVAÇÃO DE VÍDEO (desative mudando para False) ---
-    RECORD_VIDEO = True
-    video_writer = _AsyncVideoWriter() if RECORD_VIDEO else None
-    video_path = None
-    # Debounce: require consecutive frames before starting/stopping recording
-    # At ~20 FPS: START=15 ≈ 0.75 s,  STOP=50 ≈ 2.5 s
-    FACE_START_FRAMES = 15
-    FACE_STOP_FRAMES = 50
-    face_present_count = 0
-    face_absent_count = 0
-
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("🚀 MONITORAMENTO INICIADO")
-    print("="*50)
+    print("=" * 50)
     print("📊 Pressione Ctrl+C para encerrar\n")
 
     try:
-        while True:
-            frame_start = time.time()
-
-            # Captura o frame
-            frame = get_frame()
-
-            if frame is None:
-                print("⚠️  Frame perdido. Tentando recuperar...")
-                time.sleep(0.05)
-                continue
-
-            frame_count += 1
-            fps_counter += 1
-
-            # --- PROCESSAMENTO (YOLOv8-POSE) ---
-            pose_data = pose_detector.update(frame)
-            nose = pose_data["nose"]
-            eye_l = pose_data["eye_l"]
-            eye_r = pose_data["eye_r"]
-            hands = pose_data["hands"]
-            hand_l = pose_data["hand_l"]
-            hand_r = pose_data["hand_r"]
-
-            # --- ANÁLISE DE COMPORTAMENTOS ---
-            # Object detection runs every DETECT_EVERY_N frames (phone changes slowly).
-            if frame_count % DETECT_EVERY_N == 0:
-                last_phone, last_hands_busy = detect_objects(
-                    frame, model, nose, eye_l, eye_r, hands)
-            phone, hands_busy = last_phone, last_hands_busy
-
-            # Seatbelt / smoking checked at a slower cadence, only when face is visible.
-            if nose is not None and frame_count % DETECT_SLOW_N == 0:
-                last_seatbelt_on = seatbelt_detector.detect(frame)
-                face_crop = lower_face_crop(frame, nose, eye_l, eye_r)
-                if smoking_detector.detect(face_crop):
-                    smoking_hit_count += 1
-                else:
-                    smoking_hit_count = 0
-                last_smoking = smoking_hit_count >= SMOKING_CONFIRM_N
-            seatbelt_on = last_seatbelt_on if nose is not None else True
-            smoking     = last_smoking     if nose is not None else False
-            head_turned = head_turn_detector.update(nose, eye_l, eye_r)
-            eye_rubbing = eye_rub_detector.update(hands, eye_l, eye_r)
-            phone_state = phone_detector.update(phone, nose, eye_l, eye_r)
-            hand_l_busy, hand_r_busy = hand_busy_detector.update(
-                hand_l, hand_r, eye_l, eye_r, nose)
-            busy_count = int(hand_l_busy) + int(hand_r_busy)
-
-            # --- PONTUAÇÃO DE RISCO ---
-            events = {
-                "phone_call":        phone_state == "EM LIGACAO",
-                "phone_use":         phone_state == "USANDO CELULAR",
-                "head_turn":         head_turned,
-                "eye_rub":           eye_rubbing,
-                "one_hand_raised":   busy_count == 1,
-                "two_hands_raised":  busy_count == 2,
-                "hands_busy_object": hands_busy,
-                "no_seatbelt":       not seatbelt_on,
-                "smoking":           smoking,
-            }
-            stable_score = risk_tracker.update(events, frame_start)
-            state = classify_from_score(stable_score)
-
-            # --- ALERTAS ATIVOS (construído uma vez por frame) ---
-            alerts = []
-            if head_turned:
-                alerts.append("HEAD TURN")
-            if eye_rubbing:
-                alerts.append("EYE RUBBING")
-            if phone is not None:
-                alerts.append("PHONE DETECTED")
-            if phone_state == "EM LIGACAO":
-                alerts.append("ON CALL")
-            elif phone_state == "USANDO CELULAR":
-                alerts.append("PHONE IN USE")
-            if hands_busy:
-                alerts.append("HANDS BUSY")
-            if busy_count == 1:
-                alerts.append("1 MAO OCUPADA")
-            elif busy_count == 2:
-                alerts.append("2 MAOS OCUPADAS")
-            if not seatbelt_on:
-                alerts.append("NO SEATBELT")
-            if smoking:
-                alerts.append("SMOKING")
-
-            # --- GRAVAÇÃO DE VÍDEO COM DEBOUNCE ---
-            if RECORD_VIDEO:
-                face_visible = nose is not None
-                h, w = frame.shape[:2]
-
-                if face_visible:
-                    face_present_count += 1
-                    face_absent_count = 0
-                else:
-                    face_absent_count += 1
-                    face_present_count = 0
-
-                if not video_writer.isOpened() and face_present_count >= FACE_START_FRAMES:
-                    ts = time.strftime("%Y%m%d_%H%M%S")
-                    video_path = os.path.join(SNAPSHOT_DIR, f"{ts}_video.avi")
-                    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-                    if not video_writer.open(video_path, fourcc, 20.0, (w, h)):
-                        print(f"❌ Falha ao abrir VideoWriter: {video_path}")
-                        video_path = None
-                    else:
-                        print(f"🎥 Gravação iniciada: {video_path}")
-                elif video_writer.isOpened() and face_absent_count >= FACE_STOP_FRAMES:
-                    video_writer.release()
-                    print(f"🎥 Gravação encerrada: {video_path}")
-                    video_path = None
-
-                if video_writer.isOpened():
-                    video_writer.write(frame)
-
-            # --- SALVA FRAME E LOG QUANDO HÁ ALERTAS NOVOS ---
-            now = time.time()
-            current_alerts = frozenset(alerts)
-            if not alerts:
-                last_snapshot_alerts = frozenset()  # reset so next occurrence is saved
-            elif current_alerts != last_snapshot_alerts and (now - last_snapshot_time) >= SNAPSHOT_COOLDOWN:
-                ts = time.strftime("%Y%m%d_%H%M%S")
-                tag = alerts[0].replace(" ", "_")
-                filename = os.path.join(SNAPSHOT_DIR, f"{ts}_{tag}.jpg")
-                cv2.imwrite(filename, frame)
-                log_file = os.path.join(SNAPSHOT_DIR, "eventos.csv")
-                dbg = risk_tracker.debug_info()
-                risk_cols = []
-                for b in _RISK_BEHAVIORS:
-                    risk_cols += [dbg[b]["active_secs"], dbg[b]["recent_count"]]
-                write_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
-                with open(log_file, "a", newline="") as f:
-                    w = csv.writer(f)
-                    if write_header:
-                        w.writerow(_LOG_HEADER)
-                    w.writerow([
-                        ts,
-                        "; ".join(alerts),
-                        f"{stable_score:.1f}",
-                        state,
-                        os.path.basename(filename),
-                        *risk_cols,
-                    ])
-                print(f"📸 Snapshot salvo: {filename}  [{', '.join(alerts)}]")
-                last_snapshot_time = now
-                last_snapshot_alerts = current_alerts
-
-            # --- LOG DE DIAGNÓSTICO (a cada 30 frames) ---
-            if frame_count % 30 == 0:
-                elapsed = time.time() - fps_update_time
-                if elapsed > 0:
-                    current_fps = fps_counter / elapsed
-                    fps_counter = 0
-                    fps_update_time = time.time()
-                else:
-                    current_fps = 0
-
-                alert_str = ", ".join(alerts) if alerts else "none"
-
-                dbg = risk_tracker.debug_info()
-                active_dbg = {k: v for k, v in dbg.items() if v["active_secs"] > 0 or v["recent_count"] > 0}
-                print(f"[{frame_count:06d}] FPS: {current_fps:.1f} | "
-                      f"Face: {'YES' if nose is not None else 'NO ':>3} | "
-                      f"Score: {stable_score:5.1f} | "
-                      f"State: {state} | "
-                      f"Alerts: {alert_str} | "
-                      f"Risk detail: {active_dbg}")
-
-            # --- EXIBIÇÃO GRÁFICA (opcional, apenas em desktop) ---
-            if SHOW_DISPLAY:
-                display_alerts = []
-                if head_turned:
-                    display_alerts.append("VIRANDO A CABECA")
-                if eye_rubbing:
-                    display_alerts.append("ESFREGANDO OS OLHOS")
-                if phone is not None:
-                    display_alerts.append("CELULAR DETECTADO")
-                if phone_state == "EM LIGACAO":
-                    display_alerts.append("EM LIGACAO")
-                elif phone_state == "USANDO CELULAR":
-                    display_alerts.append("USANDO CELULAR")
-                if hands_busy:
-                    display_alerts.append("MAOS OCUPADAS")
-                if busy_count == 1:
-                    display_alerts.append("1 MAO LEVANTADA")
-                elif busy_count == 2:
-                    display_alerts.append("2 MAOS LEVANTADAS")
-                if not seatbelt_on:
-                    display_alerts.append("SEM CINTO DE SEGURANCA")
-                if smoking:
-                    display_alerts.append("FUMANDO")
-
-                display_frame = draw_status(frame, state, stable_score, display_alerts)
-                cv2.imshow("Monitoramento DrowsyDriving", display_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("\n⏸️  Interrompido pelo usuário (tecla Q)")
-                    break
-
-            # Controle de FPS para não sobrecarregar o Pi 5
-            frame_time = time.time() - frame_start
-            if frame_time < 0.033:  # Limita a ~30 FPS máximo
-                time.sleep(0.033 - frame_time)
-
+        while _run_one_frame(camera, frame_processor, fps_counter,
+                              snapshot_logger, recorder, show_display):
+            pass
     except KeyboardInterrupt:
         print("\n Interrompido pelo usuário (Ctrl+C)")
-
-    except Exception as e:
-        print(f"\n Erro durante execução: {e}")
-        import traceback
+    except Exception as exc:
+        print(f"\n Erro durante execução: {type(exc).__name__}: {exc}")
         traceback.print_exc()
-
     finally:
-        # --- LIMPEZA DE RECURSOS ---
-        print("\n🧹 Limpando recursos...")
-        if video_writer is not None and video_writer.isOpened():
-            video_writer.release()
-            print(f"   ✓ Vídeo salvo: {video_path}")
-        if picam2 is not None:
-            picam2.stop()
-            print("   ✓ Picamera2 liberada")
-        if cap_opencv is not None:
-            cap_opencv.release()
-            print("   ✓ OpenCV liberado")
-        cv2.destroyAllWindows()
-        print("\n✅ Programa encerrado com sucesso!")
+        _cleanup(camera, recorder)
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        camera = open_camera(camera_num=args.camera)
+    except CameraUnavailableError as exc:
+        print(f"\n❌ ERRO CRÍTICO: {exc}")
+        return
+
+    print(f"📷 Câmera pronta (backend={camera.backend})")
+    run_monitoring_loop(camera, args)
+
 
 if __name__ == "__main__":
     main()

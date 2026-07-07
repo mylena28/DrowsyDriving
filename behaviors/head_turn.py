@@ -1,7 +1,14 @@
+from typing import Optional
+
+import numpy as np
+
 from utils.geometry import distance
 
+Point = Optional[np.ndarray]
+
+
 class HeadTurnDetector:
-    def __init__(self, yaw_threshold=0.4, frames_threshold=5):
+    def __init__(self, yaw_threshold: float = 0.4, frames_threshold: int = 5):
         """
         yaw_threshold: sensibilidade para rotação da cabeça (diferença normalizada)
         frames_threshold: frames consecutivos para ativação
@@ -10,7 +17,7 @@ class HeadTurnDetector:
         self.frames_threshold = frames_threshold
         self.counter = 0
 
-    def update(self, nose, left_eye, right_eye):
+    def update(self, nose: Point, left_eye: Point, right_eye: Point) -> bool:
         """
         Retorna True se o motorista virou a cabeça por tempo suficiente.
         """
@@ -34,5 +41,5 @@ class HeadTurnDetector:
 
         return self.counter > self.frames_threshold
 
-    def reset(self):
+    def reset(self) -> None:
         self.counter = 0

@@ -1,27 +1,31 @@
 import cv2
+import numpy as np
 
-def get_color(score):
+from utils.classifier import DEFAULT_STATE
 
-    if score > 80:
-        return (0,255,0)
-
-    elif score > 60:
-        return (0,255,255)
-
-    elif score > 40:
-        return (0,165,255)
-
-    elif score > 20:
-        return (0,0,255)
-
-    else:
-        return (0,0,150)
+# Keyed by the same state labels classify_from_score() returns, so the
+# score breakpoints only live in one place (utils/classifier).
+_STATE_COLORS = {
+    "ATENTO": (0, 255, 0),
+    "MULTIPLAS TAREFAS": (0, 255, 255),
+    "DESATENCAO": (0, 165, 255),
+    "RISCO": (0, 0, 255),
+    DEFAULT_STATE: (0, 0, 150),
+}
 
 
-def draw_status(frame, state, score, alerts=None):
+def get_color(state: str) -> tuple[int, int, int]:
+    return _STATE_COLORS.get(state, _STATE_COLORS[DEFAULT_STATE])
+
+
+def draw_status(
+    frame: np.ndarray,
+    state: str,
+    alerts: list[str] | None = None,
+) -> np.ndarray:
 
     x, y = 20, 40
-    color = get_color(score)
+    color = get_color(state)
 
     cv2.putText(frame, state,
                 (x, y),
