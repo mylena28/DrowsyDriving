@@ -4,6 +4,9 @@ venv/
 *.py[cod]
 *$py.class
 
+# --- Config local do Claude Code ---
+CLAUDE.md
+
 # --- Simulações e Dados (Engenharia) ---
 *.dat
 *.out
