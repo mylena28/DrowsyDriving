@@ -103,6 +103,10 @@ main.py
 
 ### Docker (recommended)
 
+The Makefile auto-detects the container engine: it prefers Docker, and falls
+back to `podman compose` when `docker` isn't on `PATH` — no config needed
+either way.
+
 **1. Export the ONNX models** (requires the `.pt` weight files in the project root):
 
 ```bash

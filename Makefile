@@ -1,6 +1,15 @@
 # Variáveis
 PROJECT_NAME = aitireddriver
-DOCKER_COMPOSE = docker compose
+
+# Prefer Docker (the documented Pi deployment target); fall back to Podman
+# when docker isn't on PATH (e.g. dev machines that only ship Podman). Both
+# accept the same `<engine> compose` subcommand syntax.
+ifeq ($(shell command -v docker 2>/dev/null),)
+  ENGINE := podman
+else
+  ENGINE := docker
+endif
+DOCKER_COMPOSE := $(ENGINE) compose
 
 # Alvo padrão (help)
 .PHONY: help
@@ -56,12 +65,12 @@ clean:
 # Docker system prune (cuidado: remove recursos não utilizados)
 .PHONY: clean-docker
 clean-docker:
-	docker system prune -f
-	docker volume prune -f
+	$(ENGINE) system prune -f
+	$(ENGINE) volume prune -f
 
 .PHONY: clean-project
 clean-project:
-	docker compose down --volumes --rmi local
+	$(DOCKER_COMPOSE) down --volumes --rmi local
 
 # All: build + up
 .PHONY: all
