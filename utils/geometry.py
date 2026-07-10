@@ -59,3 +59,44 @@ def _crop_bounds(frame: np.ndarray, nose: np.ndarray, eye_dist: float) -> tuple[
     y1 = max(0, cy - margin_up)
     y2 = min(h, cy + margin_down)
     return x1, x2, y1, y2
+
+
+def torso_crop(frame: np.ndarray, shoulder_l: Point, shoulder_r: Point) -> np.ndarray:
+    """Crop the chest/torso region (shoulders down to waist-ish) for
+    seatbelt detection.
+
+    Uses shoulder width as the body scale, same idea as lower_face_crop's
+    use of inter-eye distance. Falls back to the full frame if either
+    shoulder keypoint is missing or too close together to be reliable.
+    """
+    if shoulder_l is None or shoulder_r is None:
+        return frame
+
+    shoulder_dist = distance(shoulder_l, shoulder_r)
+    if shoulder_dist < 10:
+        return frame
+
+    x1, x2, y1, y2 = _torso_bounds(frame, shoulder_l, shoulder_r, shoulder_dist)
+    if x2 <= x1 or y2 <= y1:
+        return frame
+    return frame[y1:y2, x1:x2]
+
+
+def _torso_bounds(
+    frame: np.ndarray, shoulder_l: np.ndarray, shoulder_r: np.ndarray, shoulder_dist: float,
+) -> tuple[int, int, int, int]:
+    mid = (np.array(shoulder_l) + np.array(shoulder_r)) / 2
+    cx, cy = int(mid[0]), int(mid[1])
+    h, w = frame.shape[:2]
+
+    # Horizontal: 1.5x shoulder-width either side (seatbelt strap crosses diagonally)
+    # Vertical: 0.3x above shoulder line, 3x below (down to roughly the buckle)
+    margin_x = int(shoulder_dist * 1.5)
+    margin_up = int(shoulder_dist * 0.3)
+    margin_down = int(shoulder_dist * 3.0)
+
+    x1 = max(0, cx - margin_x)
+    x2 = min(w, cx + margin_x)
+    y1 = max(0, cy - margin_up)
+    y2 = min(h, cy + margin_down)
+    return x1, x2, y1, y2

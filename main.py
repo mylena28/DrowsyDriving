@@ -25,7 +25,7 @@ from utils.camera import CameraSource, CameraUnavailableError, IS_RASPBERRY_PI, 
 from utils.classifier import classify_from_score
 from utils.display import draw_status
 from utils.event_log import SnapshotLogger
-from utils.geometry import lower_face_crop
+from utils.geometry import lower_face_crop, torso_crop
 from utils.risk import RiskTracker
 from utils.video_writer import DebouncedRecorder
 
@@ -82,8 +82,10 @@ class SlowDetectionState:
         self._smoking_hit_count = 0
         self._recent_hand_near_mouth: list[bool] = []
 
-    def update(self, frame: np.ndarray, nose, eye_l, eye_r, hands, detectors: Detectors) -> None:
-        self.seatbelt_on = detectors.seatbelt.detect(frame)
+    def update(
+        self, frame: np.ndarray, nose, eye_l, eye_r, shoulder_l, shoulder_r, hands, detectors: Detectors,
+    ) -> None:
+        self.seatbelt_on = detectors.seatbelt.detect(torso_crop(frame, shoulder_l, shoulder_r))
         face_crop = lower_face_crop(frame, nose, eye_l, eye_r)
         cigarette_seen = detectors.smoking.detect(face_crop)
         self._track_gesture(hand_near_mouth(hands, nose, eye_l, eye_r))
@@ -166,7 +168,8 @@ class FrameProcessor:
         nose, eye_l, eye_r, shoulder_l, shoulder_r, hands, hand_l, hand_r = self._last_pose
 
         phone, hands_busy = self._detect_phone_and_hands(frame, nose, eye_l, eye_r, hands)
-        seatbelt_on, smoking = self._detect_seatbelt_and_smoking(frame, nose, eye_l, eye_r, hands)
+        seatbelt_on, smoking = self._detect_seatbelt_and_smoking(
+            frame, nose, eye_l, eye_r, shoulder_l, shoulder_r, hands)
 
         if pose_refreshed:
             self._refresh_behaviors(nose, eye_l, eye_r, shoulder_l, shoulder_r, hands, hand_l, hand_r, phone)
@@ -224,11 +227,11 @@ class FrameProcessor:
                 frame, self._detectors.object_model, nose, eye_l, eye_r, hands)
         return self._last_phone, self._last_hands_busy
 
-    def _detect_seatbelt_and_smoking(self, frame, nose, eye_l, eye_r, hands):
+    def _detect_seatbelt_and_smoking(self, frame, nose, eye_l, eye_r, shoulder_l, shoulder_r, hands):
         """Seatbelt/smoking are checked at a slower cadence, only when a
         face is visible; assume compliant/absent while no face is found."""
         if nose is not None and self.frame_count % DETECT_SLOW_N == 0:
-            self._slow_state.update(frame, nose, eye_l, eye_r, hands, self._detectors)
+            self._slow_state.update(frame, nose, eye_l, eye_r, shoulder_l, shoulder_r, hands, self._detectors)
         if nose is None:
             return True, False
         return self._slow_state.seatbelt_on, self._slow_state.smoking
