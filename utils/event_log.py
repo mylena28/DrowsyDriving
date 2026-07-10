@@ -10,7 +10,7 @@ import cv2
 from utils.daily_dir import daily_log_dir
 
 RISK_BEHAVIORS = [
-    "phone_call", "phone_use", "head_turn", "eye_rub",
+    "phone_call", "phone_use", "head_turn", "head_down", "eye_rub",
     "one_hand_raised", "two_hands_raised", "hands_busy_object",
     "no_seatbelt", "smoking",
 ]
@@ -19,6 +19,7 @@ LOG_HEADER = [
     "phone_call_secs", "phone_call_cnt",
     "phone_use_secs",  "phone_use_cnt",
     "head_turn_secs",  "head_turn_cnt",
+    "head_down_secs",  "head_down_cnt",
     "eye_rub_secs",    "eye_rub_cnt",
     "one_hand_secs",   "one_hand_cnt",
     "two_hands_secs",  "two_hands_cnt",

@@ -12,6 +12,7 @@ import numpy as np
 
 from behaviors.eye_rub import EyeRubDetector
 from behaviors.hand_busy import HandBusyDetector
+from behaviors.head_down import HeadDownDetector
 from behaviors.head_turn import HeadTurnDetector
 from behaviors.phone_usage import PhoneStateDetector
 from detectors.object_detector import detect_objects
@@ -49,6 +50,7 @@ class Detectors:
         self.seatbelt = SeatbeltDetector()
         self.smoking = SmokingDetector()
         self.head_turn = HeadTurnDetector(frames_threshold=5)
+        self.head_down = HeadDownDetector()
         self.eye_rub = EyeRubDetector(frames_threshold=5)
         self.phone = PhoneStateDetector(call_frames_threshold=8)
         self.hand_busy = HandBusyDetector()
@@ -86,10 +88,12 @@ class FrameResult:
 
 # (log_label, display_label) pairs, in priority order, for each alert condition.
 def _active_alert_specs(
-    phone, phone_state: str, head_turned: bool, eye_rubbing: bool,
+    phone, phone_state: str, head_turned: bool, head_down: bool, eye_rubbing: bool,
     hands_busy: bool, busy_count: int, seatbelt_on: bool, smoking: bool,
 ) -> list[tuple[str, str]]:
     specs = []
+    if head_down:
+        specs.append(("HEAD DOWN", "CABECA BAIXA"))
     if head_turned:
         specs.append(("HEAD TURN", "VIRANDO A CABECA"))
     if eye_rubbing:
@@ -132,22 +136,24 @@ class FrameProcessor:
         self.frame_count += 1
         pose_data = self._detectors.pose.update(frame)
         nose, eye_l, eye_r = pose_data["nose"], pose_data["eye_l"], pose_data["eye_r"]
+        shoulder_l, shoulder_r = pose_data["shoulder_l"], pose_data["shoulder_r"]
         hands, hand_l, hand_r = pose_data["hands"], pose_data["hand_l"], pose_data["hand_r"]
 
         phone, hands_busy = self._detect_phone_and_hands(frame, nose, eye_l, eye_r, hands)
         seatbelt_on, smoking = self._detect_seatbelt_and_smoking(frame, nose, eye_l, eye_r)
 
         head_turned = self._detectors.head_turn.update(nose, eye_l, eye_r)
+        head_down = self._detectors.head_down.update(nose, eye_l, eye_r, shoulder_l, shoulder_r)
         eye_rubbing = self._detectors.eye_rub.update(hands, eye_l, eye_r)
         phone_state = self._detectors.phone.update(phone, nose, eye_l, eye_r)
         busy_count = self._count_busy_hands(hand_l, hand_r, eye_l, eye_r, nose)
 
-        events = _risk_events(phone_state, head_turned, eye_rubbing,
+        events = _risk_events(phone_state, head_turned, head_down, eye_rubbing,
                                busy_count, hands_busy, seatbelt_on, smoking)
         stable_score = self._risk_tracker.update(events, timestamp)
         state = classify_from_score(stable_score)
 
-        specs = _active_alert_specs(phone, phone_state, head_turned, eye_rubbing,
+        specs = _active_alert_specs(phone, phone_state, head_turned, head_down, eye_rubbing,
                                      hands_busy, busy_count, seatbelt_on, smoking)
         return FrameResult(
             frame_count=self.frame_count,
@@ -183,13 +189,14 @@ class FrameProcessor:
 
 
 def _risk_events(
-    phone_state: str, head_turned: bool, eye_rubbing: bool,
+    phone_state: str, head_turned: bool, head_down: bool, eye_rubbing: bool,
     busy_count: int, hands_busy: bool, seatbelt_on: bool, smoking: bool,
 ) -> dict:
     return {
         "phone_call": phone_state == "EM LIGACAO",
         "phone_use": phone_state == "USANDO CELULAR",
         "head_turn": head_turned,
+        "head_down": head_down,
         "eye_rub": eye_rubbing,
         "one_hand_raised": busy_count == 1,
         "two_hands_raised": busy_count == 2,

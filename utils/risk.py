@@ -67,6 +67,7 @@ class RiskTracker:
         "phone_call":        dict(max_pts=40, ramp_secs=30,  decay_per_sec=0.30, freq_bonus=5.0),
         "phone_use":         dict(max_pts=35, ramp_secs=30,  decay_per_sec=0.30, freq_bonus=5.0),
         "head_turn":         dict(max_pts=25, ramp_secs=20,  decay_per_sec=0.80, freq_bonus=3.0),
+        "head_down":         dict(max_pts=45, ramp_secs=15,  decay_per_sec=0.60, freq_bonus=4.0),
         "eye_rub":           dict(max_pts=20, ramp_secs=15,  decay_per_sec=1.00, freq_bonus=3.0),
         "one_hand_raised":   dict(max_pts=15, ramp_secs=60,  decay_per_sec=0.10, freq_bonus=2.0),
         "two_hands_raised":  dict(max_pts=40, ramp_secs=60,  decay_per_sec=0.10, freq_bonus=5.0),

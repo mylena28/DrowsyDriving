@@ -48,6 +48,7 @@ Key design decisions:
 | **Phone in hand** | YOLOv8 `cell phone` class + geometry | Phone center is near both face and wrist, normalized by inter-eye distance |
 | **On call / phone use** | Phone state classifier | Phone held to face (`EM LIGACAO`) or in hand (`USANDO CELULAR`) |
 | **Hands busy** | Object proximity + wrist keypoints | Any object of interest (phone, bottle, cup) close to face and hand |
+| **Head down / possible dozing** | Nose + eye + shoulder keypoints (YOLOv8-Pose) | Head pitched down toward the shoulder line, or face keypoints lost for a sustained window while shoulders stay visible |
 
 ---
 
@@ -62,6 +63,7 @@ main.py
 │   └── face_detector.py    # Auxiliary face detection
 ├── behaviors/
 │   ├── head_turn.py        # Yaw-based head-turn classifier
+│   ├── head_down.py        # Pitch + face-lost head-down/dozing classifier
 │   ├── eye_rub.py          # Proximity + oscillation eye-rub classifier
 │   └── phone_usage.py      # Phone-state machine (none / in hand / on call)
 └── utils/
