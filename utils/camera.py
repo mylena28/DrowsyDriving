@@ -84,7 +84,7 @@ def _open_picamera2(camera_num: int):
         return None
 
     print("✅ Picamera2 inicializada com sucesso!")
-    print("   Resolução: 640x480 | Formato: BGR888 | FPS: 30")
+    print("   Resolução: 640x480 | Formato: RGB888 | FPS: 30")
     return picam2
 
 
@@ -92,7 +92,13 @@ def _configure_and_start(picamera2_cls, camera_num: int):
     picam2 = picamera2_cls(camera_num=camera_num)
     config = picam2.create_video_configuration(
         main={
-            "format": "BGR888",  # matches OpenCV's native byte order
+            # Picamera2's format naming is inverted relative to OpenCV's:
+            # requesting "BGR888" actually returns RGB byte order, and
+            # "RGB888" is what actually returns (B, G, R) — the order
+            # cv2.imwrite/VideoWriter/yolo_onnx's BGR->RGB flip all assume.
+            # Confirmed against raspberrypi/picamera2 issues #848, #260.
+            # Do not "fix" this back — it's counter-intuitive but correct.
+            "format": "RGB888",
             "size": (640, 480),  # balanced resolution for Pi 5 performance
         },
         controls={
