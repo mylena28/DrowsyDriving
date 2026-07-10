@@ -155,10 +155,19 @@ class YOLOOnnx:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, intra_op_num_threads: int = 2):
+        """
+        intra_op_num_threads: ONNX Runtime's per-session thread pool size.
+        Inference calls across the app's several YOLOOnnx instances are
+        always sequential, never concurrent, so this isn't about avoiding
+        contention — it's that more threads add synchronization overhead
+        that can outweigh the gain on a tiny nano model at 320x320. 2 is a
+        more conservative default than the previous hardcoded 4; the right
+        value is hardware-dependent and worth A/B testing on the Pi.
+        """
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        opts.intra_op_num_threads = 4
+        opts.intra_op_num_threads = intra_op_num_threads
         self.session = ort.InferenceSession(
             model_path,
             sess_options=opts,
