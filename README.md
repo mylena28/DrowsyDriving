@@ -65,6 +65,7 @@ main.py
 │   ├── head_turn.py        # Yaw-based head-turn classifier
 │   ├── head_down.py        # Pitch + face-lost head-down/dozing classifier
 │   ├── eye_rub.py          # Proximity + oscillation eye-rub classifier
+│   ├── smoking_gesture.py  # Hand-near-mouth corroboration for the smoking model
 │   └── phone_usage.py      # Phone-state machine (none / in hand / on call)
 └── utils/
     ├── display.py          # Frame annotation (desktop mode only)

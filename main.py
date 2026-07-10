@@ -15,6 +15,7 @@ from behaviors.hand_busy import HandBusyDetector
 from behaviors.head_down import HeadDownDetector
 from behaviors.head_turn import HeadTurnDetector
 from behaviors.phone_usage import PhoneStateDetector
+from behaviors.smoking_gesture import hand_near_mouth
 from detectors.object_detector import detect_objects
 from detectors.pose_detector import PoseDetector
 from detectors.seatbelt_detector import SeatbeltDetector
@@ -60,19 +61,33 @@ class SlowDetectionState:
     """Holds the seatbelt/smoking readings between their slow-cadence
     (DETECT_SLOW_N-frame) detection passes."""
 
+    # Trailing slow-cadence checks to look back for a hand-near-mouth gesture.
+    # Wider than 1 tick on purpose: a real puff/exhale cycle has the hand away
+    # from the mouth for much of the window, so requiring the gesture on the
+    # exact same tick as the model hit would suppress true positives too.
+    _GESTURE_WINDOW = 3
+
     def __init__(self):
         self.seatbelt_on = True   # assume wearing until first detection
         self.smoking = False
         self._smoking_hit_count = 0
+        self._recent_hand_near_mouth: list[bool] = []
 
-    def update(self, frame: np.ndarray, nose, eye_l, eye_r, detectors: Detectors) -> None:
+    def update(self, frame: np.ndarray, nose, eye_l, eye_r, hands, detectors: Detectors) -> None:
         self.seatbelt_on = detectors.seatbelt.detect(frame)
         face_crop = lower_face_crop(frame, nose, eye_l, eye_r)
-        if detectors.smoking.detect(face_crop):
+        cigarette_seen = detectors.smoking.detect(face_crop)
+        self._track_gesture(hand_near_mouth(hands, nose, eye_l, eye_r))
+
+        if cigarette_seen and any(self._recent_hand_near_mouth):
             self._smoking_hit_count += 1
         else:
             self._smoking_hit_count = 0
         self.smoking = self._smoking_hit_count >= SMOKING_CONFIRM_N
+
+    def _track_gesture(self, seen: bool) -> None:
+        self._recent_hand_near_mouth.append(seen)
+        self._recent_hand_near_mouth = self._recent_hand_near_mouth[-self._GESTURE_WINDOW:]
 
 
 @dataclass
@@ -140,7 +155,7 @@ class FrameProcessor:
         hands, hand_l, hand_r = pose_data["hands"], pose_data["hand_l"], pose_data["hand_r"]
 
         phone, hands_busy = self._detect_phone_and_hands(frame, nose, eye_l, eye_r, hands)
-        seatbelt_on, smoking = self._detect_seatbelt_and_smoking(frame, nose, eye_l, eye_r)
+        seatbelt_on, smoking = self._detect_seatbelt_and_smoking(frame, nose, eye_l, eye_r, hands)
 
         head_turned = self._detectors.head_turn.update(nose, eye_l, eye_r)
         head_down = self._detectors.head_down.update(nose, eye_l, eye_r, shoulder_l, shoulder_r)
@@ -173,11 +188,11 @@ class FrameProcessor:
                 frame, self._detectors.object_model, nose, eye_l, eye_r, hands)
         return self._last_phone, self._last_hands_busy
 
-    def _detect_seatbelt_and_smoking(self, frame, nose, eye_l, eye_r):
+    def _detect_seatbelt_and_smoking(self, frame, nose, eye_l, eye_r, hands):
         """Seatbelt/smoking are checked at a slower cadence, only when a
         face is visible; assume compliant/absent while no face is found."""
         if nose is not None and self.frame_count % DETECT_SLOW_N == 0:
-            self._slow_state.update(frame, nose, eye_l, eye_r, self._detectors)
+            self._slow_state.update(frame, nose, eye_l, eye_r, hands, self._detectors)
         if nose is None:
             return True, False
         return self._slow_state.seatbelt_on, self._slow_state.smoking

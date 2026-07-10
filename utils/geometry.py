@@ -9,6 +9,22 @@ def distance(p1: np.ndarray, p2: np.ndarray) -> float:
     return np.linalg.norm(np.array(p1) - np.array(p2))
 
 
+# Mouth sits below the nose, roughly proportional to inter-eye distance —
+# COCO pose has no mouth keypoint, so this is a coarse proxy scaled by it.
+MOUTH_OFFSET_FACTOR = 0.4
+
+
+def approx_mouth_point(nose: Point, eye_l: Point, eye_r: Point) -> Point:
+    """Approximate mouth position from nose + eyes (no mouth keypoint in
+    COCO pose). Used to corroborate the smoking model with a hand-to-mouth
+    gesture check (see behaviors/smoking_gesture.py).
+    """
+    if nose is None or eye_l is None or eye_r is None:
+        return None
+    d_eye = distance(eye_l, eye_r)
+    return np.array(nose) + np.array([0.0, d_eye * MOUTH_OFFSET_FACTOR])
+
+
 def lower_face_crop(frame: np.ndarray, nose: Point, eye_l: Point, eye_r: Point) -> np.ndarray:
     """Crop the lower-face region (nose down to chin) for small-object detection.
 
