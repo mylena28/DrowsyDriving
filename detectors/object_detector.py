@@ -23,7 +23,7 @@ def detect_objects(
     phone_center = None
     hands_busy = False
 
-    results = model(frame, imgsz=320, verbose=False)
+    results = model(frame, verbose=False)
     for r in results:
         for box in r.boxes:
             label, obj_center = _labeled_center(box, model)

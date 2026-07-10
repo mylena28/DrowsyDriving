@@ -8,7 +8,7 @@ class PoseDetector:
         self.model = YOLOOnnx(model_path)
 
     def update(self, frame: np.ndarray) -> dict:
-        results = self.model(frame, imgsz=320, conf=0.5, verbose=False)  # inferência leve para RPi 5
+        results = self.model(frame, conf=0.5, verbose=False)  # modelo já exportado leve (320x320) para RPi 5
         for r in results:
             if r.keypoints is not None:
                 kp = r.keypoints.xy.cpu().numpy()[0]  # primeiro esqueleto detectado (o motorista)
