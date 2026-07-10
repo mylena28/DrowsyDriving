@@ -74,3 +74,34 @@ iniciais, nunca testadas com filmagem real.
 - [ ] Rodar `make build`/`make up` no Pi e confirmar que ele escolhe
       `docker` (não deveria cair para `podman` lá, já que o Pi é o alvo de
       deploy documentado com Docker).
+
+## 6. Otimizações de frequência de detecção (branch `optimize/detection-frequency`)
+
+Só testável de verdade no Pi — mudanças de FPS e sensibilidade dependem do
+hardware real.
+
+- [ ] **FPS antes/depois**: comparar o FPS impresso no log de diagnóstico
+      (`_print_diagnostics`, a cada `DIAGNOSTIC_LOG_EVERY_N=30` frames) numa
+      execução do `main` puro vs. desse branch. Deve subir, já que o pose
+      (o único modelo que rodava em 100% dos frames) agora roda a cada
+      `DETECT_POSE_N=2` frames.
+- [ ] **Esfregar os olhos ainda dispara**: os limiares `min_movement`/
+      `max_movement` do `EyeRubDetector` foram escalados por `DETECT_POSE_N`
+      (multiplicados por 2) para compensar a cadência mais lenta — é uma
+      correção calculada, não medida. Simular o gesto de esfregar os olhos
+      de verdade e confirmar que `ESFREGANDO OS OLHOS` ainda dispara.
+- [ ] **Head-turn/head-down/ligação ao telefone ainda respondem rápido o
+      suficiente**: como esses três não tiveram os `frames_threshold`
+      reduzidos (de propósito — ver commit "Gate pose and its dependent
+      behaviors..."), agora exigem ~2x mais tempo real pra disparar. Se
+      parecer lento demais na prática, ajustar `frames_threshold` em
+      `HeadTurnDetector`/`HeadDownDetector` ou `call_frames_threshold` em
+      `PhoneStateDetector`, ou baixar `DETECT_POSE_N` de volta pra 1.
+- [ ] **Cinto de segurança com o crop de torso**: comparar a detecção de
+      `SEM CINTO DE SEGURANCA` com o comportamento anterior (frame
+      completo) — checar principalmente falsos negativos (cinto colocado
+      mas não detectado) se o crop ficar apertado demais em algum ângulo de
+      câmera/postura.
+- [ ] **Threads do ONNX Runtime**: `intra_op_num_threads` mudou de 4 (fixo)
+      para 2 (padrão, configurável) em `YOLOOnnx.__init__`. Opcional: testar
+      1/2/4 manualmente e anotar qual dá o melhor FPS medido.
