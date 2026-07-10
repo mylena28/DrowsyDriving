@@ -8,6 +8,8 @@ import time
 import cv2
 import numpy as np
 
+from utils.daily_dir import daily_log_dir
+
 
 class AsyncVideoWriter:
     """Encodes and writes frames in a background thread so the main loop
@@ -81,7 +83,7 @@ class DebouncedRecorder:
     def _start(self, frame: np.ndarray) -> None:
         h, w = frame.shape[:2]
         ts = time.strftime("%Y%m%d_%H%M%S")
-        self.video_path = os.path.join(self._snapshot_dir, f"{ts}_video.avi")
+        self.video_path = os.path.join(daily_log_dir(self._snapshot_dir), f"{ts}_video.avi")
         fourcc = cv2.VideoWriter_fourcc(*"MJPG")
         if not self._writer.open(self.video_path, fourcc, 20.0, (w, h)):
             print(f"❌ Falha ao abrir VideoWriter: {self.video_path}")

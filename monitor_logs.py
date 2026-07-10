@@ -27,7 +27,8 @@ def _snapshot(logs_dir: Path) -> dict:
     total_bytes = 0
     counts = {"jpg": 0, "avi": 0, "csv": 0, "other": 0}
     if logs_dir.exists():
-        for f in logs_dir.iterdir():
+        # rglob, not iterdir: entries now live under per-day subfolders (logs/YYYY-MM-DD/)
+        for f in logs_dir.rglob("*"):
             if f.is_file():
                 total_bytes += f.stat().st_size
                 ext = f.suffix.lower().lstrip(".")

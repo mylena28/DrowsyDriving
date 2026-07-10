@@ -7,6 +7,8 @@ import time
 import numpy as np
 import cv2
 
+from utils.daily_dir import daily_log_dir
+
 RISK_BEHAVIORS = [
     "phone_call", "phone_use", "head_turn", "eye_rub",
     "one_hand_raised", "two_hands_raised", "hands_busy_object",
@@ -69,7 +71,7 @@ class SnapshotLogger:
 
     def _save_snapshot(self, frame: np.ndarray, ts: str, alerts: list[str]) -> str:
         tag = alerts[0].replace(" ", "_")
-        filename = os.path.join(self._snapshot_dir, f"{ts}_{tag}.jpg")
+        filename = os.path.join(daily_log_dir(self._snapshot_dir), f"{ts}_{tag}.jpg")
         cv2.imwrite(filename, frame)
         return filename
 
@@ -82,7 +84,7 @@ class SnapshotLogger:
         filename: str,
         risk_debug: dict,
     ) -> None:
-        log_file = os.path.join(self._snapshot_dir, "eventos.csv")
+        log_file = os.path.join(daily_log_dir(self._snapshot_dir), "eventos.csv")
         write_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
         with open(log_file, "a", newline="") as f:
             writer = csv.writer(f)
