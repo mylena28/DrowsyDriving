@@ -30,6 +30,7 @@ from utils.risk import RiskTracker
 from utils.video_writer import DebouncedRecorder
 
 TARGET_FRAME_SECONDS = 0.033   # ~30 FPS cap, sustainable on a Pi 5 with no GPU
+DETECT_POSE_N = 2              # pose (+ its dependent behaviors) cadence
 DETECT_EVERY_N = 3             # object detection cadence (phone/hands)
 DETECT_SLOW_N = 15             # seatbelt/smoking cadence (changes slowly)
 SMOKING_CONFIRM_N = 2          # consecutive positive hits required before the alert fires
@@ -52,7 +53,15 @@ class Detectors:
         self.smoking = SmokingDetector()
         self.head_turn = HeadTurnDetector(frames_threshold=5)
         self.head_down = HeadDownDetector()
-        self.eye_rub = EyeRubDetector(frames_threshold=5)
+        # min/max_movement are tuned per-sample displacement; scaled by
+        # DETECT_POSE_N so the same real hand speed still reads as
+        # "rubbing" now that samples are DETECT_POSE_N frames apart instead
+        # of consecutive frames.
+        self.eye_rub = EyeRubDetector(
+            frames_threshold=5,
+            min_movement=2 * DETECT_POSE_N,
+            max_movement=15 * DETECT_POSE_N,
+        )
         self.phone = PhoneStateDetector(call_frames_threshold=8)
         self.hand_busy = HandBusyDetector()
 
@@ -145,23 +154,23 @@ class FrameProcessor:
         self._slow_state = SlowDetectionState()
         self._last_phone = None
         self._last_hands_busy = False
+        self._last_pose = (None, None, None, None, None, [], None, None)
+        self._last_behaviors = (False, False, False, 0, "ATENTO")
         self.frame_count = 0
 
     def process(self, frame: np.ndarray, timestamp: float) -> FrameResult:
         self.frame_count += 1
-        pose_data = self._detectors.pose.update(frame)
-        nose, eye_l, eye_r = pose_data["nose"], pose_data["eye_l"], pose_data["eye_r"]
-        shoulder_l, shoulder_r = pose_data["shoulder_l"], pose_data["shoulder_r"]
-        hands, hand_l, hand_r = pose_data["hands"], pose_data["hand_l"], pose_data["hand_r"]
+        pose_refreshed = self.frame_count % DETECT_POSE_N == 0
+        if pose_refreshed:
+            self._refresh_pose(frame)
+        nose, eye_l, eye_r, shoulder_l, shoulder_r, hands, hand_l, hand_r = self._last_pose
 
         phone, hands_busy = self._detect_phone_and_hands(frame, nose, eye_l, eye_r, hands)
         seatbelt_on, smoking = self._detect_seatbelt_and_smoking(frame, nose, eye_l, eye_r, hands)
 
-        head_turned = self._detectors.head_turn.update(nose, eye_l, eye_r)
-        head_down = self._detectors.head_down.update(nose, eye_l, eye_r, shoulder_l, shoulder_r)
-        eye_rubbing = self._detectors.eye_rub.update(hands, eye_l, eye_r)
-        phone_state = self._detectors.phone.update(phone, nose, eye_l, eye_r)
-        busy_count = self._count_busy_hands(hand_l, hand_r, eye_l, eye_r, nose)
+        if pose_refreshed:
+            self._refresh_behaviors(nose, eye_l, eye_r, shoulder_l, shoulder_r, hands, hand_l, hand_r, phone)
+        head_turned, head_down, eye_rubbing, busy_count, phone_state = self._last_behaviors
 
         events = _risk_events(phone_state, head_turned, head_down, eye_rubbing,
                                busy_count, hands_busy, seatbelt_on, smoking)
@@ -179,6 +188,33 @@ class FrameProcessor:
             display_alerts=[disp for _, disp in specs],
             risk_debug=self._risk_tracker.debug_info(),
         )
+
+    def _refresh_pose(self, frame: np.ndarray) -> None:
+        """Pose is the single most expensive per-frame model call. Gating it
+        behind DETECT_POSE_N (cache + reuse on skipped frames, same pattern
+        as _detect_phone_and_hands below) cuts that cost — and since brief
+        keypoint jitter now has to persist across more real time to satisfy
+        a behavior's consecutive-frame debounce, it's a false-positive
+        reducer too, not just a speed win."""
+        pose_data = self._detectors.pose.update(frame)
+        self._last_pose = (
+            pose_data["nose"], pose_data["eye_l"], pose_data["eye_r"],
+            pose_data["shoulder_l"], pose_data["shoulder_r"],
+            pose_data["hands"], pose_data["hand_l"], pose_data["hand_r"],
+        )
+
+    def _refresh_behaviors(
+        self, nose, eye_l, eye_r, shoulder_l, shoulder_r, hands, hand_l, hand_r, phone,
+    ) -> None:
+        """Only called on the same frames _refresh_pose runs on — calling a
+        debounced .update() again with byte-identical keypoints would
+        inflate its consecutive-frame counter without any new information."""
+        head_turned = self._detectors.head_turn.update(nose, eye_l, eye_r)
+        head_down = self._detectors.head_down.update(nose, eye_l, eye_r, shoulder_l, shoulder_r)
+        eye_rubbing = self._detectors.eye_rub.update(hands, eye_l, eye_r)
+        busy_count = self._count_busy_hands(hand_l, hand_r, eye_l, eye_r, nose)
+        phone_state = self._detectors.phone.update(phone, nose, eye_l, eye_r)
+        self._last_behaviors = (head_turned, head_down, eye_rubbing, busy_count, phone_state)
 
     def _detect_phone_and_hands(self, frame, nose, eye_l, eye_r, hands):
         """Object detection runs every DETECT_EVERY_N frames; phone/hand
