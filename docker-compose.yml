@@ -20,6 +20,16 @@ services:
       # Run IPA modules in-process — the default subprocess sandbox can fail
       # inside Docker because of missing kernel namespacing features.
       - LIBCAMERA_IPA_FORCE_ISOLATION=0
+      # CPU budget on the Pi 5 (4 cores, no GPU): cap ORT per-session threads
+      # and stop OpenBLAS/OpenMP from spin-waiting, so four model sessions
+      # don't pin the board at load ~8 and starve the camera ISP / VPN daemon.
+      - ORT_INTRA_OP_THREADS=2
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - OMP_WAIT_POLICY=PASSIVE
+      # Video recording is off by default. Uncomment to record 10s clips around
+      # risk events (or set it to "presence" for the legacy face-visible mode).
+      # - RECORD_MODE=risk
     group_add:
       - "44"   # video
       - "993"  # render

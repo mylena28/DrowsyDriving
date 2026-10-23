@@ -194,7 +194,27 @@ All tunable constants live in `config.py` and at the top of each behavior class:
 | `HeadTurnDetector.yaw_threshold` | `0.4` | Yaw asymmetry to classify a head turn |
 | `EyeRubDetector.proximity_factor` | `0.8` | Hand-eye distance factor (× inter-eye distance) |
 | Camera resolution | `640×480` | Set in `initialize_picamera2()` / `initialize_opencv_fallback()` |
-| Target FPS | `30` | Frame-time cap in the main loop (`0.033 s`) |
+| Processing FPS | `10` | Frames processed per second (`--fps` / `PROCESSING_FPS`). Lower = less CPU |
+| `ORT_INTRA_OP_THREADS` | `2` | ONNX Runtime threads per model session (env var) |
+| Recording | `off` | `--record off\|risk\|presence` (or `RECORD_MODE` env) |
+
+### Command-line options
+
+```
+python3 main.py [--camera N] [--fps F] [--record off|risk|presence] [--venv]
+```
+
+- `--fps` — frames processed per second (default `10`). The camera still
+  captures at its own rate; this caps how often the models run, which is the
+  main CPU lever on the Pi 5. Lowering it stretches the frame-count cadences
+  (`DETECT_EVERY_N`, `DETECT_SLOW_N`) in real time, so retune if changed a lot.
+- `--record`:
+  - `off` (default) — no video is written.
+  - `risk` — records a ~10s clip (`RECORD_CLIP_SECONDS`) around a risk event.
+    Starts only after `RECORD_CONFIRM_FRAMES` consecutive risk frames (so a
+    one-frame false positive won't trigger it); a new event during a clip
+    extends the same file instead of starting another.
+  - `presence` — records while a face is visible (legacy behaviour).
 
 ---
 

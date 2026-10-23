@@ -5,7 +5,7 @@ import os
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import cv2
 import numpy as np
@@ -27,15 +27,29 @@ from utils.display import draw_status
 from utils.event_log import SnapshotLogger
 from utils.geometry import lower_face_crop
 from utils.risk import RiskTracker
-from utils.video_writer import DebouncedRecorder
+from utils.video_writer import DebouncedRecorder, RiskClipRecorder
 
-TARGET_FRAME_SECONDS = 0.033   # ~30 FPS cap, sustainable on a Pi 5 with no GPU
+# Processing rate, not camera capture rate. Running every ONNX model flat-out
+# pins the Pi 5; processing a handful of frames per second is plenty for
+# drowsiness/distraction (events last seconds) and frees the CPU. Override per
+# run with --fps or the PROCESSING_FPS env var. Lowering it stretches the
+# real-time meaning of the frame-count cadences below, so retune if changed a lot.
+DEFAULT_PROCESSING_FPS = 10
 DETECT_EVERY_N = 3             # object detection cadence (phone/hands)
 DETECT_SLOW_N = 15             # seatbelt/smoking cadence (changes slowly)
 SMOKING_CONFIRM_N = 2          # consecutive positive hits required before the alert fires
 DIAGNOSTIC_LOG_EVERY_N = 30
 SNAPSHOT_COOLDOWN_SECONDS = 5.0
-RECORD_VIDEO = True
+
+# Recording is opt-in (see --record). "off" writes no video; "risk" records a
+# fixed clip around confirmed risk events; "presence" records while a face is
+# visible (the legacy behaviour).
+RECORD_MODES = ("off", "risk", "presence")
+DEFAULT_RECORD_MODE = os.environ.get("RECORD_MODE", "off")
+RECORD_CLIP_SECONDS = 10.0     # length of a risk clip, extended by overlapping events
+RECORD_CONFIRM_FRAMES = 3      # consecutive risk frames before a clip starts (anti false-positive)
+
+Recorder = Union[DebouncedRecorder, RiskClipRecorder]
 
 
 class Detectors:
@@ -249,6 +263,17 @@ def parse_args() -> argparse.Namespace:
         "--camera", type=int, default=1,
         help="Índice da câmera Picamera2 a usar (padrão: 1)",
     )
+    parser.add_argument(
+        "--fps", type=float,
+        default=float(os.environ.get("PROCESSING_FPS", DEFAULT_PROCESSING_FPS)),
+        help=f"Quadros processados por segundo (padrão: {DEFAULT_PROCESSING_FPS}). "
+             "Menor = menos CPU.",
+    )
+    parser.add_argument(
+        "--record", choices=RECORD_MODES, default=DEFAULT_RECORD_MODE,
+        help="Gravação de vídeo: off (padrão), risk (clipe fixo em evento de "
+             "risco) ou presence (enquanto houver rosto).",
+    )
     return parser.parse_args()
 
 
@@ -276,10 +301,10 @@ def _show_frame(frame: np.ndarray, result: FrameResult) -> bool:
     return True
 
 
-def _throttle_to_target_fps(frame_start: float) -> None:
+def _throttle_to_target_fps(frame_start: float, target_frame_seconds: float) -> None:
     frame_time = time.time() - frame_start
-    if frame_time < TARGET_FRAME_SECONDS:
-        time.sleep(TARGET_FRAME_SECONDS - frame_time)
+    if frame_time < target_frame_seconds:
+        time.sleep(target_frame_seconds - frame_time)
 
 
 def _run_one_frame(
@@ -287,8 +312,9 @@ def _run_one_frame(
     frame_processor: FrameProcessor,
     fps_counter: FpsCounter,
     snapshot_logger: SnapshotLogger,
-    recorder: Optional[DebouncedRecorder],
+    recorder: Optional[Recorder],
     show_display: bool,
+    target_frame_seconds: float,
 ) -> bool:
     """Processes one frame. Returns False if the loop should stop (the user
     pressed 'q' in the display window)."""
@@ -309,23 +335,30 @@ def _run_one_frame(
     if show_display and not _show_frame(frame, result):
         return False
 
-    _throttle_to_target_fps(frame_start)
+    _throttle_to_target_fps(frame_start, target_frame_seconds)
     return True
 
 
 def _record_and_log(
     frame: np.ndarray,
     result: FrameResult,
-    recorder: Optional[DebouncedRecorder],
+    recorder: Optional[Recorder],
     snapshot_logger: SnapshotLogger,
 ) -> None:
     if recorder is not None:
-        recorder.update(frame, face_visible=result.nose is not None)
+        # A risk event = any active alert this frame. The recorder decides what
+        # to do with each signal (presence mode uses face_visible, risk mode
+        # uses risk_active).
+        recorder.update(
+            frame,
+            face_visible=result.nose is not None,
+            risk_active=bool(result.alerts),
+        )
     snapshot_logger.maybe_log(
         frame, result.alerts, result.stable_score, result.state, result.risk_debug)
 
 
-def _cleanup(camera: CameraSource, recorder: Optional[DebouncedRecorder]) -> None:
+def _cleanup(camera: CameraSource, recorder: Optional[Recorder]) -> None:
     print("\n🧹 Limpando recursos...")
     if recorder is not None and recorder.isOpened():
         video_path = recorder.video_path
@@ -339,31 +372,44 @@ def _cleanup(camera: CameraSource, recorder: Optional[DebouncedRecorder]) -> Non
 
 def _build_session(
     args: argparse.Namespace,
-) -> tuple[FrameProcessor, FpsCounter, SnapshotLogger, Optional[DebouncedRecorder]]:
+) -> tuple[FrameProcessor, FpsCounter, SnapshotLogger, Optional[Recorder]]:
     frame_processor = FrameProcessor(Detectors())
     fps_counter = FpsCounter()
 
     snapshot_dir = os.path.join(os.path.dirname(__file__), "logs")
     os.makedirs(snapshot_dir, exist_ok=True)
     snapshot_logger = SnapshotLogger(snapshot_dir, cooldown_secs=SNAPSHOT_COOLDOWN_SECONDS)
-    recorder = DebouncedRecorder(snapshot_dir) if RECORD_VIDEO else None
+    recorder = _build_recorder(args.record, snapshot_dir, args.fps)
     return frame_processor, fps_counter, snapshot_logger, recorder
+
+
+def _build_recorder(mode: str, snapshot_dir: str, fps: float) -> Optional[Recorder]:
+    if mode == "risk":
+        return RiskClipRecorder(
+            snapshot_dir, fps=fps,
+            clip_seconds=RECORD_CLIP_SECONDS, confirm_frames=RECORD_CONFIRM_FRAMES)
+    if mode == "presence":
+        return DebouncedRecorder(snapshot_dir, fps=fps)
+    return None
 
 
 def run_monitoring_loop(camera: CameraSource, args: argparse.Namespace) -> None:
     frame_processor, fps_counter, snapshot_logger, recorder = _build_session(args)
     show_display = args.venv or ("DISPLAY" in os.environ and not IS_RASPBERRY_PI)
+    target_frame_seconds = 1.0 / args.fps if args.fps > 0 else 0.0
     if args.venv:
         print("🖥️  Modo venv ativado: exibindo câmera com diagnóstico em tela")
 
     print("\n" + "=" * 50)
     print("🚀 MONITORAMENTO INICIADO")
     print("=" * 50)
+    print(f"⚙️  {args.fps:.0f} FPS alvo | gravação: {args.record}")
     print("📊 Pressione Ctrl+C para encerrar\n")
 
     try:
         while _run_one_frame(camera, frame_processor, fps_counter,
-                              snapshot_logger, recorder, show_display):
+                             snapshot_logger, recorder, show_display,
+                             target_frame_seconds):
             pass
     except KeyboardInterrupt:
         print("\n Interrompido pelo usuário (Ctrl+C)")
