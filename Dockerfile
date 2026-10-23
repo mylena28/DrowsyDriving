@@ -41,6 +41,14 @@ FROM debian:bookworm-slim AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
+# CPU budget defaults for a Pi 5 (4 cores, no GPU). docker-compose.yml can
+# override these; they keep ONNX Runtime / OpenBLAS from grabbing every core
+# and spin-waiting between inferences.
+ENV ORT_INTRA_OP_THREADS=2
+ENV OMP_NUM_THREADS=2
+ENV OPENBLAS_NUM_THREADS=2
+ENV OMP_WAIT_POLICY=PASSIVE
+
 # Base packages — work on both amd64 and arm64
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip python3-numpy python3-opencv \

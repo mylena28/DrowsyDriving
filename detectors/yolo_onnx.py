@@ -10,6 +10,8 @@ Usage is intentionally compatible with the ultralytics YOLO call convention so
 existing code needs only to change the import, not the inference calls.
 """
 
+import os
+
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -32,6 +34,25 @@ COCO_CLASSES = [
 ]
 
 NUM_POSE_KP = 17  # COCO keypoints
+
+# Each of the four models (object/pose/seatbelt/smoking) opens its own ORT
+# session, and on a Pi 5 (4 cores, no GPU) four sessions each grabbing every
+# core is what pins the board at load ~8. Cap the per-session pool small and
+# leave headroom for the camera ISP and the netclient VPN daemon. Override
+# with ORT_INTRA_OP_THREADS when running on a beefier host.
+_INTRA_OP_THREADS = int(os.environ.get("ORT_INTRA_OP_THREADS", "2"))
+
+
+def _build_session_options() -> ort.SessionOptions:
+    """ORT session tuned for a many-session, CPU-only, low-core deployment."""
+    opts = ort.SessionOptions()
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts.intra_op_num_threads = _INTRA_OP_THREADS
+    opts.inter_op_num_threads = 1
+    # Without this the intra-op pool busy-waits between inferences, so every
+    # session holds its cores at 100% even while the loop is idle/throttled.
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return opts
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +177,9 @@ class YOLOOnnx:
     """
 
     def __init__(self, model_path: str):
-        opts = ort.SessionOptions()
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        opts.intra_op_num_threads = 4
         self.session = ort.InferenceSession(
             model_path,
-            sess_options=opts,
+            sess_options=_build_session_options(),
             providers=["CPUExecutionProvider"],
         )
         inp = self.session.get_inputs()[0]
