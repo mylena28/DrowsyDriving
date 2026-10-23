@@ -201,9 +201,13 @@ All tunable constants live in `config.py` and at the top of each behavior class:
 ### Command-line options
 
 ```
-python3 main.py [--camera N] [--fps F] [--record off|risk|presence] [--venv]
+python3 main.py [--camera N | --camera-id-contains ID] [--fps F] [--record off|risk|presence] [--venv]
 ```
 
+- `--camera-id-contains` — selects the CSI camera whose libcamera Id contains
+  this substring (default `88000`). Robust to index reordering between boots,
+  and keeps DrowsyDriving off the camera another project uses (e.g. the FATIGUE
+  project binds to `70000`). `--camera N` forces an explicit index instead.
 - `--fps` — frames processed per second (default `10`). The camera still
   captures at its own rate; this caps how often the models run, which is the
   main CPU lever on the Pi 5. Lowering it stretches the frame-count cadences

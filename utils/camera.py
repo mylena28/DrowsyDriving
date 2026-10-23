@@ -15,6 +15,12 @@ IS_RASPBERRY_PI = (
     os.path.exists("/usr/bin/rpicam-hello") or os.path.exists("/usr/bin/libcamera-hello")
 )
 
+# This Pi 5 has two CSI imx500 cameras: one at i2c@88000, one at i2c@70000.
+# DrowsyDriving uses 88000; the FATIGUE project uses 70000. Selecting by Id
+# substring (not by numeric index) keeps the two from colliding even if
+# libcamera reorders the indices between boots.
+DEFAULT_CAMERA_ID_CONTAINS = "88000"
+
 
 class CameraUnavailableError(RuntimeError):
     """No capture backend (Picamera2 or OpenCV) could produce a frame."""
@@ -40,14 +46,20 @@ class CameraSource:
         self._release()
 
 
-def open_camera(camera_num: int = 1) -> CameraSource:
+def open_camera(
+    camera_num: Optional[int] = None,
+    camera_id_contains: Optional[str] = None,
+) -> CameraSource:
     """Opens Picamera2 on a detected Raspberry Pi, else falls back to OpenCV.
 
-    Raises CameraUnavailableError with a diagnostic message if neither
-    backend can produce frames.
+    Camera selection: an explicit `camera_num` index wins; otherwise the CSI
+    camera whose libcamera Id contains `camera_id_contains` is used (defaults
+    to DEFAULT_CAMERA_ID_CONTAINS). Raises CameraUnavailableError with a
+    diagnostic message if neither backend can produce frames.
     """
+    id_contains = camera_id_contains or DEFAULT_CAMERA_ID_CONTAINS
     if IS_RASPBERRY_PI:
-        picam2 = _open_picamera2(camera_num)
+        picam2 = _open_picamera2(camera_num, id_contains)
         if picam2 is not None:
             return CameraSource("picamera2", picam2.capture_array, picam2.stop)
         print("\n⚠️  Picamera2 falhou. Tentando fallback OpenCV...")
@@ -63,7 +75,7 @@ def open_camera(camera_num: int = 1) -> CameraSource:
     )
 
 
-def _open_picamera2(camera_num: int):
+def _open_picamera2(camera_num: Optional[int], camera_id_contains: str):
     """Returns a started Picamera2 instance, or None if import/init fails."""
     try:
         from picamera2 import Picamera2
@@ -73,10 +85,12 @@ def _open_picamera2(camera_num: int):
         return None
 
     try:
-        picam2 = _configure_and_start(Picamera2, camera_num)
-        _check_first_frame(picam2, camera_num)
+        resolved_num = _resolve_camera_num(Picamera2, camera_num, camera_id_contains)
+        picam2 = _configure_and_start(Picamera2, resolved_num)
+        _check_first_frame(picam2, resolved_num)
     except Exception as exc:
-        print(f"❌ Erro ao inicializar Picamera2 (camera_num={camera_num}): {exc}")
+        print(f"❌ Erro ao inicializar Picamera2 "
+              f"(camera_num={camera_num}, id~'{camera_id_contains}'): {exc}")
         print("\n📋 Diagnóstico rápido:")
         print("   1. Verifique o cabo da câmera: libcamera-hello --list-cameras")
         print("   2. Teste a câmera manualmente: libcamera-hello -t 5")
@@ -86,6 +100,22 @@ def _open_picamera2(camera_num: int):
     print("✅ Picamera2 inicializada com sucesso!")
     print("   Resolução: 640x480 | Formato: RGB888 | FPS: 30")
     return picam2
+
+
+def _resolve_camera_num(picamera2_cls, camera_num: Optional[int], camera_id_contains: str) -> int:
+    """Picks the Picamera2 index to open. An explicit camera_num wins;
+    otherwise the camera whose libcamera Id contains camera_id_contains is
+    used, falling back to index 0 when nothing matches."""
+    if camera_num is not None:
+        return camera_num
+    infos = picamera2_cls.global_camera_info()
+    for idx, info in enumerate(infos):
+        if camera_id_contains in str(info.get("Id", "")):
+            print(f"📷 Câmera id~'{camera_id_contains}' → índice {idx} (Id={info.get('Id', '?')})")
+            return idx
+    print(f"⚠️  Nenhuma câmera com Id contendo '{camera_id_contains}' entre "
+          f"{len(infos)} detectada(s); usando índice 0.")
+    return 0
 
 
 def _configure_and_start(picamera2_cls, camera_num: int):

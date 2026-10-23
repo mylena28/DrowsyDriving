@@ -21,7 +21,10 @@ from detectors.pose_detector import PoseDetector
 from detectors.seatbelt_detector import SeatbeltDetector
 from detectors.smoking_detector import SmokingDetector
 from detectors.yolo_onnx import YOLOOnnx
-from utils.camera import CameraSource, CameraUnavailableError, IS_RASPBERRY_PI, open_camera
+from utils.camera import (
+    CameraSource, CameraUnavailableError, DEFAULT_CAMERA_ID_CONTAINS,
+    IS_RASPBERRY_PI, open_camera,
+)
 from utils.classifier import classify_from_score
 from utils.display import draw_status
 from utils.event_log import SnapshotLogger
@@ -260,8 +263,14 @@ def parse_args() -> argparse.Namespace:
         help="Modo venv: abre janela com câmera e diagnóstico em texto (sem caixas)",
     )
     parser.add_argument(
-        "--camera", type=int, default=1,
-        help="Índice da câmera Picamera2 a usar (padrão: 1)",
+        "--camera", type=int, default=None,
+        help="Índice explícito da câmera Picamera2. Se omitido, seleciona pela "
+             "Id (--camera-id-contains).",
+    )
+    parser.add_argument(
+        "--camera-id-contains", type=str, default=None,
+        help=f"Trecho da Id da câmera CSI a usar (padrão: '{DEFAULT_CAMERA_ID_CONTAINS}', "
+             "a do DrowsyDriving). Ignorado se --camera for passado.",
     )
     parser.add_argument(
         "--fps", type=float,
@@ -423,7 +432,8 @@ def run_monitoring_loop(camera: CameraSource, args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     try:
-        camera = open_camera(camera_num=args.camera)
+        camera = open_camera(
+            camera_num=args.camera, camera_id_contains=args.camera_id_contains)
     except CameraUnavailableError as exc:
         print(f"\n❌ ERRO CRÍTICO: {exc}")
         return
