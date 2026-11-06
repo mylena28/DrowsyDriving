@@ -70,8 +70,8 @@ main.py
 └── utils/
     ├── display.py          # Frame annotation (desktop mode only)
     ├── stabilizer.py       # Temporal state smoother (sliding-window vote)
-    ├── risk.py             # Composite risk score
-    ├── classifier.py       # State label from score
+    ├── behavior_stats.py   # Per-behavior duration + episode count (no scoring; risk is evaluated by AvaliadorRisco)
+    ├── event_log.py        # Snapshot + logs/AAAA-MM-DD/eventos.csv (timestamp, alerts, snapshot, *_secs/*_cnt)
     ├── geometry.py         # Euclidean distance helper
     └── constants.py        # Shared thresholds
 ```

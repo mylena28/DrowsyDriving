@@ -1,42 +1,25 @@
 import cv2
 import numpy as np
 
-from utils.classifier import DEFAULT_STATE
-
-# Keyed by the same state labels classify_from_score() returns, so the
-# score breakpoints only live in one place (utils/classifier).
-_STATE_COLORS = {
-    "ATENTO": (0, 255, 0),
-    "MULTIPLAS TAREFAS": (0, 255, 255),
-    "DESATENCAO": (0, 165, 255),
-    "RISCO": (0, 0, 255),
-    DEFAULT_STATE: (0, 0, 150),
-}
+# Only shows what was detected. No state label / color bands: risk levels are
+# decided by the AvaliadorRisco container, not here (see utils/behavior_stats).
+_HEADER_COLOR = (255, 255, 255)
+_ALERT_COLOR = (0, 200, 255)
 
 
-def get_color(state: str) -> tuple[int, int, int]:
-    return _STATE_COLORS.get(state, _STATE_COLORS[DEFAULT_STATE])
+def draw_status(frame: np.ndarray, alerts: list[str] | None = None) -> np.ndarray:
+    """Writes the active detections on the debug window frame.
 
-
-def draw_status(
-    frame: np.ndarray,
-    state: str,
-    alerts: list[str] | None = None,
-) -> np.ndarray:
-
+    Example: draw_status(frame, ["SEM CINTO DE SEGURANCA"])
+    """
     x, y = 20, 40
-    color = get_color(state)
+    header = "DETECCOES" if alerts else "SEM DETECCOES"
+    cv2.putText(frame, header, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, _HEADER_COLOR, 2)
 
-    cv2.putText(frame, state,
-                (x, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0, color, 2)
-
-    if alerts:
-        for i, alert in enumerate(alerts):
-            cv2.putText(frame, f"  {alert}",
-                        (x, y + 40 + i * 32),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 200, 255), 2)
+    for i, alert in enumerate(alerts or []):
+        cv2.putText(frame, f"  {alert}",
+                    (x, y + 40 + i * 32),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, _ALERT_COLOR, 2)
 
     return frame

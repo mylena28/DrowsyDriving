@@ -25,11 +25,10 @@ from utils.camera import (
     CameraSource, CameraUnavailableError, DEFAULT_CAMERA_ID_CONTAINS,
     IS_RASPBERRY_PI, open_camera,
 )
-from utils.classifier import classify_from_score
 from utils.display import draw_status
+from utils.behavior_stats import BehaviorStat, BehaviorStatsTracker
 from utils.event_log import SnapshotLogger
 from utils.geometry import lower_face_crop
-from utils.risk import RiskTracker
 from utils.video_writer import DebouncedRecorder, RiskClipRecorder
 
 # Processing rate, not camera capture rate. Running every ONNX model flat-out
@@ -111,11 +110,9 @@ class SlowDetectionState:
 class FrameResult:
     frame_count: int
     nose: Optional[np.ndarray]
-    stable_score: float
-    state: str
     alerts: list = field(default_factory=list)
     display_alerts: list = field(default_factory=list)
-    risk_debug: dict = field(default_factory=dict)
+    behavior_stats: dict[str, BehaviorStat] = field(default_factory=dict)
 
 
 # (log_label, display_label) pairs, in priority order, for each alert condition.
@@ -150,15 +147,16 @@ def _active_alert_specs(
 
 
 class FrameProcessor:
-    """Runs one frame through pose/object/behavior detection and risk
-    scoring. Owns the inter-frame state that used to live as loop-local
+    """Runs one frame through pose/object/behavior detection and measures
+    each behavior (duration/frequency). Risk scoring is NOT done here: the
+    AvaliadorRisco container evaluates eventos.csv. Owns the inter-frame state that used to live as loop-local
     variables in main(): the last object-detection result (reused between
     DETECT_EVERY_N cadence steps) and the slow seatbelt/smoking readings.
     """
 
     def __init__(self, detectors: Detectors):
         self._detectors = detectors
-        self._risk_tracker = RiskTracker()
+        self._behavior_stats = BehaviorStatsTracker()
         self._slow_state = SlowDetectionState()
         self._last_phone = None
         self._last_hands_busy = False
@@ -180,21 +178,18 @@ class FrameProcessor:
         phone_state = self._detectors.phone.update(phone, nose, eye_l, eye_r)
         busy_count = self._count_busy_hands(hand_l, hand_r, eye_l, eye_r, nose)
 
-        events = _risk_events(phone_state, head_turned, head_down, eye_rubbing,
-                               busy_count, hands_busy, seatbelt_on, smoking)
-        stable_score = self._risk_tracker.update(events, timestamp)
-        state = classify_from_score(stable_score)
+        events = _behavior_events(phone_state, head_turned, head_down, eye_rubbing,
+                                  busy_count, hands_busy, seatbelt_on, smoking)
+        self._behavior_stats.update(events, timestamp)
 
         specs = _active_alert_specs(phone, phone_state, head_turned, head_down, eye_rubbing,
                                      hands_busy, busy_count, seatbelt_on, smoking)
         return FrameResult(
             frame_count=self.frame_count,
             nose=nose,
-            stable_score=stable_score,
-            state=state,
             alerts=[log for log, _ in specs],
             display_alerts=[disp for _, disp in specs],
-            risk_debug=self._risk_tracker.debug_info(),
+            behavior_stats=self._behavior_stats.stats(),
         )
 
     def _detect_phone_and_hands(self, frame, nose, eye_l, eye_r, hands):
@@ -220,10 +215,10 @@ class FrameProcessor:
         return int(hand_l_busy) + int(hand_r_busy)
 
 
-def _risk_events(
+def _behavior_events(
     phone_state: str, head_turned: bool, head_down: bool, eye_rubbing: bool,
     busy_count: int, hands_busy: bool, seatbelt_on: bool, smoking: bool,
-) -> dict:
+) -> dict[str, bool]:
     return {
         "phone_call": phone_state == "EM LIGACAO",
         "phone_use": phone_state == "USANDO CELULAR",
@@ -288,21 +283,19 @@ def parse_args() -> argparse.Namespace:
 
 def _print_diagnostics(result: FrameResult, current_fps: float) -> None:
     alert_str = ", ".join(result.alerts) if result.alerts else "none"
-    active_debug = {
-        k: v for k, v in result.risk_debug.items()
-        if v["active_secs"] > 0 or v["recent_count"] > 0
+    active_stats = {
+        k: (v.active_secs, v.recent_count) for k, v in result.behavior_stats.items()
+        if v.active_secs > 0 or v.recent_count > 0
     }
     print(f"[{result.frame_count:06d}] FPS: {current_fps:.1f} | "
           f"Face: {'YES' if result.nose is not None else 'NO ':>3} | "
-          f"Score: {result.stable_score:5.1f} | "
-          f"State: {result.state} | "
           f"Alerts: {alert_str} | "
-          f"Risk detail: {active_debug}")
+          f"(secs, starts/5min): {active_stats}")
 
 
 def _show_frame(frame: np.ndarray, result: FrameResult) -> bool:
     """Renders the debug overlay window. Returns False if the user pressed 'q'."""
-    display_frame = draw_status(frame, result.state, result.display_alerts)
+    display_frame = draw_status(frame, result.display_alerts)
     cv2.imshow("Monitoramento DrowsyDriving", display_frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
         print("\n⏸️  Interrompido pelo usuário (tecla Q)")
@@ -355,7 +348,7 @@ def _record_and_log(
     snapshot_logger: SnapshotLogger,
 ) -> None:
     if recorder is not None:
-        # A risk event = any active alert this frame. The recorder decides what
+        # A risk event = any active detection this frame. The recorder decides what
         # to do with each signal (presence mode uses face_visible, risk mode
         # uses risk_active).
         recorder.update(
@@ -363,8 +356,7 @@ def _record_and_log(
             face_visible=result.nose is not None,
             risk_active=bool(result.alerts),
         )
-    snapshot_logger.maybe_log(
-        frame, result.alerts, result.stable_score, result.state, result.risk_debug)
+    snapshot_logger.maybe_log(frame, result.alerts, result.behavior_stats)
 
 
 def _cleanup(camera: CameraSource, recorder: Optional[Recorder]) -> None:

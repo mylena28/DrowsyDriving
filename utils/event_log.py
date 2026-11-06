@@ -7,15 +7,13 @@ import time
 import numpy as np
 import cv2
 
+from utils.behavior_stats import TRACKED_BEHAVIORS, BehaviorStat
 from utils.daily_dir import daily_log_dir
 
-RISK_BEHAVIORS = [
-    "phone_call", "phone_use", "head_turn", "head_down", "eye_rub",
-    "one_hand_raised", "two_hands_raised", "hands_busy_object",
-    "no_seatbelt", "smoking",
-]
+# No score/state columns: risk is evaluated by the AvaliadorRisco container,
+# which reads columns 0-1 (timestamp, alerts) — keep those two first.
 LOG_HEADER = [
-    "timestamp", "alerts", "score", "state", "snapshot",
+    "timestamp", "alerts", "snapshot",
     "phone_call_secs", "phone_call_cnt",
     "phone_use_secs",  "phone_use_cnt",
     "head_turn_secs",  "head_turn_cnt",
@@ -46,9 +44,7 @@ class SnapshotLogger:
         self,
         frame: np.ndarray,
         alerts: list[str],
-        stable_score: float,
-        state: str,
-        risk_debug: dict,
+        behavior_stats: dict[str, BehaviorStat],
     ) -> None:
         current_alerts = frozenset(alerts)
         if not alerts:
@@ -59,7 +55,7 @@ class SnapshotLogger:
 
         ts = time.strftime("%Y%m%d_%H%M%S")
         filename = self._save_snapshot(frame, ts, alerts)
-        self._append_csv_row(ts, alerts, stable_score, state, filename, risk_debug)
+        self._append_csv_row(ts, alerts, filename, behavior_stats)
 
         print(f"📸 Snapshot salvo: {filename}  [{', '.join(alerts)}]")
         self._last_snapshot_time = time.time()
@@ -80,10 +76,8 @@ class SnapshotLogger:
         self,
         ts: str,
         alerts: list[str],
-        stable_score: float,
-        state: str,
         filename: str,
-        risk_debug: dict,
+        behavior_stats: dict[str, BehaviorStat],
     ) -> None:
         log_file = os.path.join(daily_log_dir(self._snapshot_dir), "eventos.csv")
         write_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
@@ -94,15 +88,14 @@ class SnapshotLogger:
             writer.writerow([
                 ts,
                 "; ".join(alerts),
-                f"{stable_score:.1f}",
-                state,
                 os.path.basename(filename),
-                *_risk_columns(risk_debug),
+                *_behavior_columns(behavior_stats),
             ])
 
 
-def _risk_columns(risk_debug: dict) -> list:
+def _behavior_columns(behavior_stats: dict[str, BehaviorStat]) -> list:
     cols = []
-    for behavior in RISK_BEHAVIORS:
-        cols += [risk_debug[behavior]["active_secs"], risk_debug[behavior]["recent_count"]]
+    for behavior in TRACKED_BEHAVIORS:
+        stat = behavior_stats[behavior]
+        cols += [stat.active_secs, stat.recent_count]
     return cols

@@ -53,9 +53,11 @@
 
 ## Tests
 
-- No automated test suite exists yet. If you add one, use `pytest` and wire
-  it up so it runs with a single command (document that command here once
-  it exists).
+- `pytest` suite in `tests/` (pure-Python modules only; no camera/ONNX). Run it
+  in a throwaway container, never on the host:
+  `podman run --rm -v "$PWD":/src:ro,Z -w /src docker.io/library/python:3.11-slim sh -c 'pip install -q pytest numpy opencv-python-headless && python -m pytest -q -p no:cacheprovider tests'`
+- Risk scoring is NOT done in this repo: `eventos.csv` carries only detections
+  and per-behavior duration/count; the AvaliadorRisco container evaluates them.
 - Every new function gets a test. Bug fixes get a regression test.
 - Mock external I/O (camera, ONNX runtime, filesystem) with named fake
   classes, not inline stubs.
