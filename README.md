@@ -211,7 +211,7 @@ python3 main.py [--camera N | --camera-id-contains ID] [--fps F] [--record off|r
 - `--fps` — frames processed per second (default `10`). The camera still
   captures at its own rate; this caps how often the models run, which is the
   main CPU lever on the Pi 5. Lowering it stretches the frame-count cadences
-  (`DETECT_EVERY_N`, `DETECT_SLOW_N`) in real time, so retune if changed a lot.
+  (`DETECT_EVERY_N`, `DETECT_SLOW_N`, `DETECT_SEATBELT_N`) in real time, so retune if changed a lot.
 - `--record`:
   - `off` (default) — no video is written.
   - `risk` — records a ~10s clip (`RECORD_CLIP_SECONDS`) around a risk event.

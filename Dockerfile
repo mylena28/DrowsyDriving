@@ -69,6 +69,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         python3-picamera2 libcamera-ipa rpicam-apps-lite && \
+    apt-get purge -y --auto-remove gnupg curl && \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 
@@ -81,16 +82,19 @@ WORKDIR /app
 RUN pip3 install --no-cache-dir --break-system-packages \
     onnxruntime
 
-COPY --from=builder /app/yolov8n.onnx .
-COPY --from=builder /app/yolov8n-pose.onnx .
-
-COPY . .
-
+# User first, then COPY --chown: a later `chown -R /app` would duplicate every
+# copied file into a new layer (it cost ~1.15 GB on the Pi, image 6.1 GB).
 RUN groupadd -f -g 44 video && groupadd -f -g 993 render && \
     useradd -m -s /bin/bash -G video,render salte && \
     mkdir -p /tmp/Ultralytics && \
-    chown -R salte:salte /app /tmp/Ultralytics && \
-    chmod +x /app/docker-entrypoint.sh
+    chown salte:salte /app /tmp/Ultralytics
+
+COPY --chown=salte:salte --from=builder /app/yolov8n.onnx .
+COPY --chown=salte:salte --from=builder /app/yolov8n-pose.onnx .
+
+COPY --chown=salte:salte . .
+# After `COPY . .` so the executable bit isn't overwritten by the checkout's mode.
+COPY --chown=salte:salte --chmod=755 docker-entrypoint.sh .
 
 # Entrypoint runs as root to fix volume permissions, then drops to salte
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

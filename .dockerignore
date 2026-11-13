@@ -9,3 +9,17 @@ venv/
 *.onnx
 docker-compose.log
 .github/
+
+# Runtime data and dev-only files never belong in the image. logs/ is
+# bind-mounted at run time; without this line `COPY . .` baked ~1.1 GB of
+# snapshots into every build on the Pi (image was 6.1 GB).
+logs/
+tests/
+.claude/
+*.md
+eventos.dat
+log_growth_data.csv
+monitor_logs.py
+Dockerfile
+docker-compose*.yml
+Makefile

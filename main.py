@@ -23,7 +23,7 @@ from detectors.smoking_detector import SmokingDetector
 from detectors.yolo_onnx import YOLOOnnx
 from utils.camera import (
     CameraSource, CameraUnavailableError, DEFAULT_CAMERA_ID_CONTAINS,
-    IS_RASPBERRY_PI, open_camera,
+    IS_RASPBERRY_PI, camera_frame_rate, open_camera,
 )
 from utils.display import draw_status
 from utils.behavior_stats import BehaviorStat, BehaviorStatsTracker
@@ -38,7 +38,11 @@ from utils.video_writer import DebouncedRecorder, RiskClipRecorder
 # real-time meaning of the frame-count cadences below, so retune if changed a lot.
 DEFAULT_PROCESSING_FPS = 10
 DETECT_EVERY_N = 3             # object detection cadence (phone/hands)
-DETECT_SLOW_N = 15             # seatbelt/smoking cadence (changes slowly)
+DETECT_SLOW_N = 15             # smoking cadence (changes slowly)
+# Seatbelt is the costliest model (full frame) and the slowest-changing state:
+# checking it every 3 s (at 10 FPS) instead of 1.5 s halves its CPU share and
+# only delays the NO SEATBELT alert by up to 1.5 s.
+DETECT_SEATBELT_N = 30
 SMOKING_CONFIRM_N = 2          # consecutive positive hits required before the alert fires
 DIAGNOSTIC_LOG_EVERY_N = 30
 SNAPSHOT_COOLDOWN_SECONDS = 5.0
@@ -75,7 +79,7 @@ class Detectors:
 
 class SlowDetectionState:
     """Holds the seatbelt/smoking readings between their slow-cadence
-    (DETECT_SLOW_N-frame) detection passes."""
+    detection passes (DETECT_SEATBELT_N / DETECT_SLOW_N frames)."""
 
     # Trailing slow-cadence checks to look back for a hand-near-mouth gesture.
     # Wider than 1 tick on purpose: a real puff/exhale cycle has the hand away
@@ -89,8 +93,10 @@ class SlowDetectionState:
         self._smoking_hit_count = 0
         self._recent_hand_near_mouth: list[bool] = []
 
-    def update(self, frame: np.ndarray, nose, eye_l, eye_r, hands, detectors: Detectors) -> None:
+    def update_seatbelt(self, frame: np.ndarray, detectors: Detectors) -> None:
         self.seatbelt_on = detectors.seatbelt.detect(frame)
+
+    def update_smoking(self, frame: np.ndarray, nose, eye_l, eye_r, hands, detectors: Detectors) -> None:
         face_crop = lower_face_crop(frame, nose, eye_l, eye_r)
         cigarette_seen = detectors.smoking.detect(face_crop)
         self._track_gesture(hand_near_mouth(hands, nose, eye_l, eye_r))
@@ -203,10 +209,12 @@ class FrameProcessor:
     def _detect_seatbelt_and_smoking(self, frame, nose, eye_l, eye_r, hands):
         """Seatbelt/smoking are checked at a slower cadence, only when a
         face is visible; assume compliant/absent while no face is found."""
-        if nose is not None and self.frame_count % DETECT_SLOW_N == 0:
-            self._slow_state.update(frame, nose, eye_l, eye_r, hands, self._detectors)
         if nose is None:
             return True, False
+        if self.frame_count % DETECT_SEATBELT_N == 0:
+            self._slow_state.update_seatbelt(frame, self._detectors)
+        if self.frame_count % DETECT_SLOW_N == 0:
+            self._slow_state.update_smoking(frame, nose, eye_l, eye_r, hands, self._detectors)
         return self._slow_state.seatbelt_on, self._slow_state.smoking
 
     def _count_busy_hands(self, hand_l, hand_r, eye_l, eye_r, nose) -> int:
@@ -425,7 +433,8 @@ def main() -> None:
     args = parse_args()
     try:
         camera = open_camera(
-            camera_num=args.camera, camera_id_contains=args.camera_id_contains)
+            camera_num=args.camera, camera_id_contains=args.camera_id_contains,
+            frame_rate=camera_frame_rate(args.fps))
     except CameraUnavailableError as exc:
         print(f"\n❌ ERRO CRÍTICO: {exc}")
         return

@@ -21,6 +21,24 @@ IS_RASPBERRY_PI = (
 # libcamera reorders the indices between boots.
 DEFAULT_CAMERA_ID_CONTAINS = "88000"
 
+# The sensor/ISP used to run at a fixed 30 FPS while the loop only consumes
+# ~10, so two of every three frames were captured, debayered and copied for
+# nothing. The camera now runs at 2x the processing rate (headroom so
+# capture_array() never waits a full frame period), capped at the old 30.
+MAX_CAMERA_FPS = 30.0
+CAMERA_FPS_HEADROOM = 2.0
+
+
+def camera_frame_rate(processing_fps: float) -> float:
+    """Sensor frame rate for a given processing rate.
+
+    Example: camera_frame_rate(10) -> 20.0; camera_frame_rate(0) -> 30.0
+    (0 = unthrottled loop, so keep the maximum).
+    """
+    if processing_fps <= 0:
+        return MAX_CAMERA_FPS
+    return min(MAX_CAMERA_FPS, processing_fps * CAMERA_FPS_HEADROOM)
+
 
 class CameraUnavailableError(RuntimeError):
     """No capture backend (Picamera2 or OpenCV) could produce a frame."""
@@ -49,6 +67,7 @@ class CameraSource:
 def open_camera(
     camera_num: Optional[int] = None,
     camera_id_contains: Optional[str] = None,
+    frame_rate: float = MAX_CAMERA_FPS,
 ) -> CameraSource:
     """Opens Picamera2 on a detected Raspberry Pi, else falls back to OpenCV.
 
@@ -59,7 +78,7 @@ def open_camera(
     """
     id_contains = camera_id_contains or DEFAULT_CAMERA_ID_CONTAINS
     if IS_RASPBERRY_PI:
-        picam2 = _open_picamera2(camera_num, id_contains)
+        picam2 = _open_picamera2(camera_num, id_contains, frame_rate)
         if picam2 is not None:
             return CameraSource("picamera2", picam2.capture_array, picam2.stop)
         print("\n⚠️  Picamera2 falhou. Tentando fallback OpenCV...")
@@ -75,7 +94,7 @@ def open_camera(
     )
 
 
-def _open_picamera2(camera_num: Optional[int], camera_id_contains: str):
+def _open_picamera2(camera_num: Optional[int], camera_id_contains: str, frame_rate: float):
     """Returns a started Picamera2 instance, or None if import/init fails."""
     try:
         from picamera2 import Picamera2
@@ -86,7 +105,7 @@ def _open_picamera2(camera_num: Optional[int], camera_id_contains: str):
 
     try:
         resolved_num = _resolve_camera_num(Picamera2, camera_num, camera_id_contains)
-        picam2 = _configure_and_start(Picamera2, resolved_num)
+        picam2 = _configure_and_start(Picamera2, resolved_num, frame_rate)
         _check_first_frame(picam2, resolved_num)
     except Exception as exc:
         print(f"❌ Erro ao inicializar Picamera2 "
@@ -98,7 +117,7 @@ def _open_picamera2(camera_num: Optional[int], camera_id_contains: str):
         return None
 
     print("✅ Picamera2 inicializada com sucesso!")
-    print("   Resolução: 640x480 | Formato: RGB888 | FPS: 30")
+    print(f"   Resolução: 640x480 | Formato: RGB888 | FPS câmera: {frame_rate:.0f}")
     return picam2
 
 
@@ -118,7 +137,7 @@ def _resolve_camera_num(picamera2_cls, camera_num: Optional[int], camera_id_cont
     return 0
 
 
-def _configure_and_start(picamera2_cls, camera_num: int):
+def _configure_and_start(picamera2_cls, camera_num: int, frame_rate: float):
     picam2 = picamera2_cls(camera_num=camera_num)
     config = picam2.create_video_configuration(
         main={
@@ -132,7 +151,7 @@ def _configure_and_start(picamera2_cls, camera_num: int):
             "size": (640, 480),  # balanced resolution for Pi 5 performance
         },
         controls={
-            "FrameRate": 30.0,   # cap FPS for stability
+            "FrameRate": frame_rate,  # see camera_frame_rate()
             "AwbMode": 0,        # auto white balance
             "AnalogueGain": 1.0, # default gain
         },
