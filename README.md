@@ -194,7 +194,7 @@ All tunable constants live in `config.py` and at the top of each behavior class:
 | `HeadTurnDetector.yaw_threshold` | `0.4` | Yaw asymmetry to classify a head turn |
 | `EyeRubDetector.proximity_factor` | `0.8` | Hand-eye distance factor (× inter-eye distance) |
 | Camera resolution | `640×480` | Set in `initialize_picamera2()` / `initialize_opencv_fallback()` |
-| Processing FPS | `10` | Frames processed per second (`--fps` / `PROCESSING_FPS`). Lower = less CPU |
+| Processing FPS | `8` | Frames processed per second (`--fps` / `PROCESSING_FPS`). Lower = less CPU |
 | `ORT_INTRA_OP_THREADS` | `2` | ONNX Runtime threads per model session (env var) |
 | Recording | `off` | `--record off\|risk\|presence` (or `RECORD_MODE` env) |
 
@@ -208,10 +208,12 @@ python3 main.py [--camera N | --camera-id-contains ID] [--fps F] [--record off|r
   this substring (default `88000`). Robust to index reordering between boots,
   and keeps DrowsyDriving off the camera another project uses (e.g. the FATIGUE
   project binds to `70000`). `--camera N` forces an explicit index instead.
-- `--fps` — frames processed per second (default `10`). The camera still
-  captures at its own rate; this caps how often the models run, which is the
-  main CPU lever on the Pi 5. Lowering it stretches the frame-count cadences
-  (`DETECT_EVERY_N`, `DETECT_SLOW_N`, `DETECT_SEATBELT_N`) in real time, so retune if changed a lot.
+- `--fps` — frames processed per second (default `8`). The camera runs at 2x
+  this rate (max 30); this caps how often the models run, which is the main CPU
+  lever on the Pi 5. Alert thresholds are declared in seconds
+  (`utils/cadence.py`) and converted to frames for the chosen rate, so alert
+  timing does not change with `--fps`. Only object detection (`DETECT_EVERY_N`,
+  every 3 frames) is a pure frame cadence.
 - `--record`:
   - `off` (default) — no video is written.
   - `risk` — records a ~10s clip (`RECORD_CLIP_SECONDS`) around a risk event.

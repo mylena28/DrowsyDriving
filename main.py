@@ -27,6 +27,7 @@ from utils.camera import (
 )
 from utils.display import draw_status
 from utils.behavior_stats import BehaviorStat, BehaviorStatsTracker
+from utils.cadence import EYE_RUB_MAX_MOVE_PX, EYE_RUB_MIN_MOVE_PX, Cadence, per_frame
 from utils.event_log import SnapshotLogger
 from utils.geometry import lower_face_crop
 from utils.video_writer import DebouncedRecorder, RiskClipRecorder
@@ -34,15 +35,14 @@ from utils.video_writer import DebouncedRecorder, RiskClipRecorder
 # Processing rate, not camera capture rate. Running every ONNX model flat-out
 # pins the Pi 5; processing a handful of frames per second is plenty for
 # drowsiness/distraction (events last seconds) and frees the CPU. Override per
-# run with --fps or the PROCESSING_FPS env var. Lowering it stretches the
-# real-time meaning of the frame-count cadences below, so retune if changed a lot.
-DEFAULT_PROCESSING_FPS = 10
-DETECT_EVERY_N = 3             # object detection cadence (phone/hands)
-DETECT_SLOW_N = 15             # smoking cadence (changes slowly)
-# Seatbelt is the costliest model (full frame) and the slowest-changing state:
-# checking it every 3 s (at 10 FPS) instead of 1.5 s halves its CPU share and
-# only delays the NO SEATBELT alert by up to 1.5 s.
-DETECT_SEATBELT_N = 30
+# run with --fps or the PROCESSING_FPS env var. 8 (was 10) cuts ~20% CPU on the
+# Pi; alert thresholds are in seconds in utils/cadence.py (converted to
+# frames), so alert timing does not change with --fps.
+DEFAULT_PROCESSING_FPS = 8
+# Object detection (phone/hands) stays a frame cadence on purpose: it is a
+# sampling rate, not an alert duration, and converting 0.3 s at 8 FPS would
+# round to every 2 frames, i.e. MORE inferences per second than before.
+DETECT_EVERY_N = 3
 SMOKING_CONFIRM_N = 2          # consecutive positive hits required before the alert fires
 DIAGNOSTIC_LOG_EVERY_N = 30
 SNAPSHOT_COOLDOWN_SECONDS = 5.0
@@ -53,7 +53,6 @@ SNAPSHOT_COOLDOWN_SECONDS = 5.0
 RECORD_MODES = ("off", "risk", "presence")
 DEFAULT_RECORD_MODE = os.environ.get("RECORD_MODE", "off")
 RECORD_CLIP_SECONDS = 10.0     # length of a risk clip, extended by overlapping events
-RECORD_CONFIRM_FRAMES = 3      # consecutive risk frames before a clip starts (anti false-positive)
 
 Recorder = Union[DebouncedRecorder, RiskClipRecorder]
 
@@ -65,21 +64,27 @@ class Detectors:
     explicitly to FrameProcessor rather than read from module globals.
     """
 
-    def __init__(self):
+    def __init__(self, cadence: Cadence):
         self.object_model = YOLOOnnx("yolov8n.onnx")
         self.pose = PoseDetector("yolov8n-pose.onnx")
         self.seatbelt = SeatbeltDetector()
         self.smoking = SmokingDetector()
-        self.head_turn = HeadTurnDetector(frames_threshold=5)
-        self.head_down = HeadDownDetector()
-        self.eye_rub = EyeRubDetector(frames_threshold=5)
-        self.phone = PhoneStateDetector(call_frames_threshold=8)
+        self.head_turn = HeadTurnDetector(frames_threshold=cadence.head_turn_gt)
+        self.head_down = HeadDownDetector(
+            pitch_frames_threshold=cadence.head_pitch_frames,
+            face_lost_frames_threshold=cadence.head_face_lost_frames)
+        self.eye_rub = EyeRubDetector(
+            frames_threshold=cadence.eye_rub_gt,
+            history_size=cadence.eye_rub_history,
+            min_movement=per_frame(EYE_RUB_MIN_MOVE_PX, cadence.fps),
+            max_movement=per_frame(EYE_RUB_MAX_MOVE_PX, cadence.fps))
+        self.phone = PhoneStateDetector(call_frames_threshold=cadence.phone_call_gt)
         self.hand_busy = HandBusyDetector()
 
 
 class SlowDetectionState:
     """Holds the seatbelt/smoking readings between their slow-cadence
-    detection passes (DETECT_SEATBELT_N / DETECT_SLOW_N frames)."""
+    detection passes (SEATBELT_CHECK_SECS / SMOKING_CHECK_SECS)."""
 
     # Trailing slow-cadence checks to look back for a hand-near-mouth gesture.
     # Wider than 1 tick on purpose: a real puff/exhale cycle has the hand away
@@ -160,8 +165,9 @@ class FrameProcessor:
     DETECT_EVERY_N cadence steps) and the slow seatbelt/smoking readings.
     """
 
-    def __init__(self, detectors: Detectors):
+    def __init__(self, detectors: Detectors, cadence: Cadence):
         self._detectors = detectors
+        self._cadence = cadence
         self._behavior_stats = BehaviorStatsTracker()
         self._slow_state = SlowDetectionState()
         self._last_phone = None
@@ -211,9 +217,9 @@ class FrameProcessor:
         face is visible; assume compliant/absent while no face is found."""
         if nose is None:
             return True, False
-        if self.frame_count % DETECT_SEATBELT_N == 0:
+        if self.frame_count % self._cadence.seatbelt_every == 0:
             self._slow_state.update_seatbelt(frame, self._detectors)
-        if self.frame_count % DETECT_SLOW_N == 0:
+        if self.frame_count % self._cadence.smoking_every == 0:
             self._slow_state.update_smoking(frame, nose, eye_l, eye_r, hands, self._detectors)
         return self._slow_state.seatbelt_on, self._slow_state.smoking
 
@@ -382,23 +388,24 @@ def _cleanup(camera: CameraSource, recorder: Optional[Recorder]) -> None:
 def _build_session(
     args: argparse.Namespace,
 ) -> tuple[FrameProcessor, FpsCounter, SnapshotLogger, Optional[Recorder]]:
-    frame_processor = FrameProcessor(Detectors())
+    cadence = Cadence.at_fps(args.fps)
+    frame_processor = FrameProcessor(Detectors(cadence), cadence)
     fps_counter = FpsCounter()
 
     snapshot_dir = os.path.join(os.path.dirname(__file__), "logs")
     os.makedirs(snapshot_dir, exist_ok=True)
     snapshot_logger = SnapshotLogger(snapshot_dir, cooldown_secs=SNAPSHOT_COOLDOWN_SECONDS)
-    recorder = _build_recorder(args.record, snapshot_dir, args.fps)
+    recorder = _build_recorder(args.record, snapshot_dir, cadence)
     return frame_processor, fps_counter, snapshot_logger, recorder
 
 
-def _build_recorder(mode: str, snapshot_dir: str, fps: float) -> Optional[Recorder]:
+def _build_recorder(mode: str, snapshot_dir: str, cadence: Cadence) -> Optional[Recorder]:
     if mode == "risk":
         return RiskClipRecorder(
-            snapshot_dir, fps=fps,
-            clip_seconds=RECORD_CLIP_SECONDS, confirm_frames=RECORD_CONFIRM_FRAMES)
+            snapshot_dir, fps=cadence.fps,
+            clip_seconds=RECORD_CLIP_SECONDS, confirm_frames=cadence.record_confirm_frames)
     if mode == "presence":
-        return DebouncedRecorder(snapshot_dir, fps=fps)
+        return DebouncedRecorder(snapshot_dir, fps=cadence.fps)
     return None
 
 
